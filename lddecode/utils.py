@@ -5,18 +5,13 @@ import itertools
 import json
 import math
 import os
-import errno
 import subprocess
 import sys
 import traceback
 import signal
-import time
-import warnings
 
 import threading
 from queue import Queue
-from concurrent.futures import Future, ProcessPoolExecutor
-import multiprocessing
 
 from numba import jit, njit
 import numba
@@ -93,6 +88,13 @@ def scale(buf, begin, end, tgtlen, mult=1):
     return output
 
 
+# Kaiser Beta parameter controls trade-off between sharpness and ringing
+# Small Beta = more sharpness / more ringing (narrow main lobe (more sharp), less side lobe cutoff (more ringing))
+# Large Beta = less sharpness / less ringing (wide main lobe (less sharp), more side lobe cutoff (less ringing))
+kaiser_beta = 5
+sinc_tap_count = 16 # must be multiple of 2
+sinc_phase_count = 2**16
+
 @njit
 def sinc(x):
     if x == 0.0:
@@ -138,43 +140,6 @@ def build_kaiser_lut(beta, taps, phases):
     table[phases] = table[phases - 1]
 
     return table
-
-# Kaiser Beta parameter controls trade-off between sharpness and ringing
-# Small Beta = more sharpness / more ringing (narrow main lobe (more sharp), less side lobe cutoff (more ringing))
-# Large Beta = less sharpness / less ringing (wide main lobe (less sharp), more side lobe cutoff (less ringing))
-kaiser_beta = 5
-sinc_tap_count = 16 # must be multiple of 2
-sinc_phase_count = 2**16
-
-def _build_completed_future(value):
-    future = Future()
-    future.set_result(value)
-    return future
-
-
-def _init_sinc_lut_future():
-    # Avoid process spawning for frozen/Windows startup paths:
-    # on Windows, spawned processes re-import modules, and creating a
-    # ProcessPoolExecutor at import time can recursively spawn workers.
-    if os.name == "nt" or getattr(sys, "frozen", False):
-        return None, _build_completed_future(
-            build_kaiser_lut(kaiser_beta, sinc_tap_count, sinc_phase_count)
-        )
-
-    # Also avoid nested pool creation inside non-main processes.
-    if multiprocessing.current_process().name != "MainProcess":
-        return None, _build_completed_future(
-            build_kaiser_lut(kaiser_beta, sinc_tap_count, sinc_phase_count)
-        )
-
-    # Keep startup responsive on non-Windows main processes.
-    executor = ProcessPoolExecutor(max_workers=1)
-    return executor, executor.submit(
-        build_kaiser_lut, kaiser_beta, sinc_tap_count, sinc_phase_count
-    )
-
-
-_sinc_lut_executor, sinc_lut_future = _init_sinc_lut_future()
 
 
 @njit(nogil=True, fastmath=True)
@@ -881,53 +846,36 @@ if not numba.version_info.major and numba.version_info.minor < 59:
     print("DEPRECATION WARNING: Please upgrade numba to 0.59 or later.", file=sys.stderr)
     print("(follow instructions on the ld-decode wiki to set up a virtualenv)", file=sys.stderr)
 
-    @njit(cache=True,nogil=True)
-    def unwrap_hilbert_getangles(hilbert):
-        tangles = np.angle(hilbert)
-        dangles = np.ediff1d(tangles, to_begin=np.asarray(0, dtype=tangles.dtype)).real
 
-        # make sure unwapping goes the right way
-        if dangles[0] < -pi:
-            dangles[0] += tau
+@njit(cache=True, nogil=True)
+def unwrap_hilbert(hilbert, freq_hz):
+    """Recover the instantaneous frequency (Hz, in the range [0, freq_hz)) of an
+    analytic (complex) signal.
 
-        return dangles
+    Conjugate-product FM discriminator: the per-sample phase increment is taken
+    as the argument of hilbert[n] * conj(hilbert[n-1]).  arctan2 returns that
+    increment already wrapped into (-pi, pi], so there is no need for the
+    np.unwrap() pass nor the subsequent re-wrap "fixangles" clamp that the
+    previous implementation depended on.
 
-    @njit(cache=True,nogil=True)
-    def unwrap_hilbert_fixangles(tdangles2, freq_hz):
-        # With extremely bad data, the unwrapped angles can jump.
-        while np.min(tdangles2) < 0:
-            tdangles2[tdangles2 < 0] += tau
-        while np.max(tdangles2) > tau:
-            tdangles2[tdangles2 > tau] -= tau
+    On well-behaved data this is numerically equivalent to the old
+    angle-difference + unwrap method, but it is local: a single corrupted sample
+    only disturbs its own increment instead of being propagated forward by
+    np.unwrap().  It is also fully numba-jittable (the old deprecation path ran
+    np.unwrap outside numba) and uses a single arctan2 pass instead of an
+    arctan2 pass plus an unwrap pass plus the clamp loops.
+    """
+    out = np.empty(len(hilbert), dtype=np.float64)
+    out[0] = 0.0
 
-        return tdangles2 * (freq_hz / tau)
+    # phase increment between consecutive samples = arg(z[n] * conj(z[n-1]))
+    prod = hilbert[1:] * np.conj(hilbert[:-1])
+    d = np.arctan2(prod.imag, prod.real)
 
-    def unwrap_hilbert(hilbert, freq_hz):
-        dangles = unwrap_hilbert_getangles(hilbert)
+    # preserve the historical [0, tau) convention (positive frequencies only)
+    out[1:] = np.where(d < 0.0, d + tau, d)
 
-        # This can't be run with numba
-        tdangles2 = np.unwrap(dangles)
-
-        return unwrap_hilbert_fixangles(tdangles2, freq_hz) #* (freq_hz / tau)
-else:
-    @njit(cache=True,nogil=True)
-    def unwrap_hilbert(hilbert, freq_hz):
-        tangles = np.angle(hilbert)
-        dangles = np.ediff1d(tangles, to_begin=np.asarray(0, dtype=tangles.dtype)).real
-
-        # make sure unwapping goes the right way
-        if dangles[0] < -pi:
-            dangles[0] += tau
-
-        dangles = np.unwrap(dangles)
-
-        # With extremely bad data, the unwrapped angles can jump.
-        while np.min(dangles) < 0:
-            dangles[dangles < 0] += tau
-        while np.max(dangles) > tau:
-            dangles[dangles > tau] -= tau
-
-        return dangles * (freq_hz / tau)
+    return out * (freq_hz / tau)
 
 def fft_determine_slices(center, min_bandwidth, freq_hz, bins_in):
     """ returns the # of sub-bins needed to get center+/-min_bandwidth.
@@ -1069,7 +1017,10 @@ def hz_to_output_array(input, ire0, hz_ire, outputZero, vsync_ire, out_scale):
     offset = outputZero - vsync_ire * out_scale - ire0 * scale
 
     for i in range(n):
-        out[i] = np.uint16(max(0, min(65535, input[i] * scale + offset)))
+        # +0.5 rounds to nearest, matching the scalar Field.hz_to_output path;
+        # without it np.uint16() truncates and every output pixel is biased
+        # roughly half an LSB low.
+        out[i] = np.uint16(max(0, min(65535, input[i] * scale + offset + 0.5)))
 
     return out
 
