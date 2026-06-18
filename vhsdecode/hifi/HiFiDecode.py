@@ -196,8 +196,6 @@ class AFEFilterable:
     def work(self, data):
         return sosfiltfilt_rust(self.bandpass, data)
 
-QUADRATURE_LP_ORDER = 5
-
 class FMdemod:
     def __init__(
         self, sample_rate, carrier_center, deviation, max_iq_len, type
@@ -212,10 +210,6 @@ class FMdemod:
         self.min_float = float_info.min + float_info.epsneg
 
         if self.type == DEMOD_QUADRATURE:
-            quadrature_lp_b, quadrature_lp_a = butter(QUADRATURE_LP_ORDER, self.carrier / self.sample_rate / 2)
-            self.quadrature_lp_b = quadrature_lp_b.astype(DEMOD_DTYPE_NP)
-            self.quadrature_lp_a = quadrature_lp_a.astype(DEMOD_DTYPE_NP)
-        
             iq_len = self._get_min_iq_length(max_iq_len)
             self.i_osc = np.empty(iq_len, dtype=DEMOD_DTYPE_NP, order="C")
             self.q_osc = np.empty(iq_len, dtype=DEMOD_DTYPE_NP, order="C")
@@ -358,8 +352,6 @@ class FMdemod:
                 numba.types.float32,
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
-                numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
-                numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.int32,
                 numba.types.int32,
                 numba.types.int32,
@@ -369,8 +361,6 @@ class FMdemod:
                 NumbaAudioArray,
                 numba.types.float32,
                 numba.types.float32,
-                numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
-                numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.int32,
@@ -389,46 +379,20 @@ class FMdemod:
         max_float,
         i_osc,
         q_osc,
-        filter_b,
-        filter_a,
         sample_rate,
         carrier,
         deviation,
     ):
-        # Numba optimized implementation of:
-        #
-        # # mix in  i/q
-        # i_signal = in_rf * i_osc
-        # q_signal = in_rf * q_osc
-        #
-        # # low pass filter
-        # i_filtered = lfilter(filter_b, filter_a, i_signal)
-        # q_filtered = lfilter(filter_b, filter_a, q_signal)
-        #
-        # # unwrap angles
-        # phase = np.arctan2(q_filtered, i_filtered)
-        # inst_freq = np.diff(np.unwrap(phase)) / (2 * pi * (1 / sample_rate))
-        # demod = inst_freq - carrier
-
         # constants
         two_pi = 2 * pi
         phase_scale = sample_rate / (two_pi * deviation)
         carrier_scaled = carrier / deviation
         iq_len = len(i_osc)
         rf_len = len(in_rf)
-
-        #
-        # low pass filter history
-        #
-        i_in_hist = np.zeros(QUADRATURE_LP_ORDER, dtype=np.float64)
-        q_in_hist = np.zeros(QUADRATURE_LP_ORDER, dtype=np.float64)
-        i_filtered_hist = np.zeros(QUADRATURE_LP_ORDER, dtype=np.float64)
-        q_filtered_hist = np.zeros(QUADRATURE_LP_ORDER, dtype=np.float64)
-
         prev_angle = 0  # doesn't matter since the final chunks have overlap
         prev_unwrapped = prev_angle
 
-        for i in range(1, rf_len - QUADRATURE_LP_ORDER):
+        for i in range(1, rf_len):
             #
             # mix in i/q, reflect the sine and cosine
             #
@@ -440,38 +404,9 @@ class FMdemod:
             q_in = rf_signed * q_osc[iq_index]
 
             #
-            # low pass filter
-            #
-            i_filtered = filter_b[0] * i_in
-            q_filtered = filter_b[0] * q_in
-
-            i_filtered += filter_b[QUADRATURE_LP_ORDER] * i_in_hist[QUADRATURE_LP_ORDER - 1] - filter_a[QUADRATURE_LP_ORDER] * i_filtered_hist[QUADRATURE_LP_ORDER - 1]
-            q_filtered += filter_b[QUADRATURE_LP_ORDER] * q_in_hist[QUADRATURE_LP_ORDER - 1] - filter_a[QUADRATURE_LP_ORDER] * q_filtered_hist[QUADRATURE_LP_ORDER - 1]
-
-            for f_idx in range(QUADRATURE_LP_ORDER - 2, -1, -1):
-                next_f_idx = f_idx + 1
-                b = filter_b[next_f_idx]
-                a = filter_a[next_f_idx]
-                i_filtered += b * i_in_hist[f_idx] - a * i_filtered_hist[f_idx]
-                q_filtered += b * q_in_hist[f_idx] - a * q_filtered_hist[f_idx]
-
-                # Shift histories forward
-                i_in_hist[next_f_idx] = i_in_hist[f_idx]
-                i_filtered_hist[next_f_idx] = i_filtered_hist[f_idx]
-
-                q_in_hist[next_f_idx] = q_in_hist[f_idx]
-                q_filtered_hist[next_f_idx] = q_filtered_hist[f_idx]
-
-            i_in_hist[0] = i_in
-            i_filtered_hist[0] = i_filtered
-
-            q_in_hist[0] = q_in
-            q_filtered_hist[0] = q_filtered
-
-            #
             # unwrap angles
             #
-            current_angle = atan2(q_filtered, i_filtered)
+            current_angle = atan2(q_in, i_in)
             delta = current_angle - prev_angle
             delta += two_pi * ((delta < -pi) - (delta > pi))
             unwrapped = prev_unwrapped + delta
@@ -502,8 +437,6 @@ class FMdemod:
                 self.max_float,
                 self.i_osc,
                 self.q_osc,
-                self.quadrature_lp_b,
-                self.quadrature_lp_a,
                 self.sample_rate,
                 self.carrier,
                 self.deviation,
