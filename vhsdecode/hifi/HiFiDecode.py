@@ -1073,12 +1073,6 @@ class HiFiDecode:
         )
         self.standard_original = deepcopy(self.standard)
 
-        a_iirb, a_iira = firdes_lowpass(
-            self.if_rate, self.audio_rate * 3 / 4, self.audio_rate / 3, order_limit=10
-        )
-        self.preAudioResampleL = FiltersClass(a_iirb, a_iira, dtype=np.float64)
-        self.preAudioResampleR = FiltersClass(a_iirb, a_iira, dtype=np.float64)
-
         self.headswitch_interpolation_enabled = self.options[
             "head_switching_interpolation"
         ]
@@ -2216,19 +2210,6 @@ class HiFiDecode:
 
         if measure_perf:
             end_if_resampler = perf_counter()
-
-        # low pass filter to remove any remaining high frequency noise
-        # disabled since it interferes with head switching noise detection
-        # preL = self.preAudioResampleL.lfilt(preL)
-        # preR = self.preAudioResampleR.lfilt(preR)
-        # preL = preL.astype(REAL_DTYPE, copy=False)
-        # preR = preR.astype(REAL_DTYPE, copy=False)
-
-        # with ProcessPoolExecutor(2) as stereo_executor:
-        #     audioL_future = stereo_executor.submit(HiFiDecode.audio_process, preL, self.audio_process_params)
-        #     audioR_future = stereo_executor.submit(HiFiDecode.audio_process, preR, self.audio_process_params)
-        #     preL, dcL = audioL_future.result()
-        #     preR, dcR = audioR_future.result()
 
         if measure_perf:
             start_carrier_filter = perf_counter()
