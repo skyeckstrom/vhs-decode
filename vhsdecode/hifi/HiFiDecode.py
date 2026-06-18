@@ -22,8 +22,6 @@ from scipy.signal import (
     lfilter_zi,
     filtfilt,
     lfilter,
-    iirpeak,
-    iirnotch,
     butter,
     stft,
     istft,
@@ -31,7 +29,7 @@ from scipy.signal import (
     find_peaks,
     freqz,
     bilinear,
-    tf2sos
+    cheby2
 )
 from scipy.interpolate import interp1d
 from soxr import ResampleStream, resample
@@ -85,39 +83,10 @@ class FiltersClass:
         return output
 
 
-class AFEBandPass:
-    def __init__(self, filters_params, sample_rate):
-        self.samp_rate = sample_rate
-        self.filter_params = filters_params
-
-        b_lo, a_lo = firdes_lowpass(
-            self.samp_rate,
-            self.filter_params.RFFrontend_R,
-            self.filter_params.RFtransition,
-        )
-
-        b_hi, a_hi = firdes_highpass(
-            self.samp_rate,
-            self.filter_params.RFFrontend_L,
-            self.filter_params.RFtransition,
-        )
-
-        self.sos = np.vstack(
-            [
-                tf2sos(b_hi, a_hi),
-                tf2sos(b_lo, a_lo),
-            ]
-        )
-
-    def work(self, data):
-        return sosfiltfilt_rust(self.sos, data)
-
-
 @dataclass
 class AFEParamsVHS:
     def __init__(self):
         self.VCODeviation = 150e3
-        self.RFtransition = 350e3
 
 
 @dataclass
@@ -126,9 +95,6 @@ class AFEParams8mm:
         self.VCODeviation = 100e3
         self.LCarrierRef = 1.5e6
         self.RCarrierRef = 1.7e6
-        self.RFFrontend_L = self.LCarrierRef - self.VCODeviation
-        self.RFFrontend_R = self.RCarrierRef + self.VCODeviation
-        self.RFtransition = 350e3
 
 
 @dataclass
@@ -137,9 +103,6 @@ class AFEParamsPALVHS(AFEParamsVHS):
         super().__init__()
         self.LCarrierRef = 1.4e6
         self.RCarrierRef = 1.8e6
-        self.RFFrontend_L = self.LCarrierRef - self.VCODeviation
-        self.RFFrontend_R = self.RCarrierRef + self.VCODeviation
-        self.Hfreq = 15.625e3
 
 
 @dataclass
@@ -148,8 +111,6 @@ class AFEParamsNTSCVHS(AFEParamsVHS):
         super().__init__()
         self.LCarrierRef = 1.3e6
         self.RCarrierRef = 1.7e6
-        self.RFFrontend_L = self.LCarrierRef - self.VCODeviation
-        self.RFFrontend_R = self.RCarrierRef + self.VCODeviation
         self.Hfreq = 15.750e3
 
 
@@ -159,6 +120,47 @@ class AFEParamsNTSC8mm(AFEParams8mm):
         super().__init__()
         self.Hfreq = 15.750e3
 
+# from scipy.signal import chirp
+# def plot_responses(*filters, n=2**20):
+#     plt.figure()
+# 
+#     # time axis
+#     t = np.arange(n)
+# 
+#     for i, filt in enumerate(filters):
+# 
+#         fs = filt.samp_rate
+#         t_sec = t / fs
+# 
+#         # log sweep from DC-ish to Nyquist (adjust as needed)
+#         f0 = 10          # start freq (Hz)
+#         f1 = fs / 2 * 0.9  # end freq (Hz)
+# 
+#         x = chirp(t_sec, f0=f0, f1=f1, t1=t_sec[-1], method='logarithmic')
+# 
+#         # run through filter
+#         y = filt.work(x)
+# 
+#         # FFT-based transfer estimate
+#         X = np.fft.rfft(x)
+#         Y = np.fft.rfft(y)
+# 
+#         H = Y / (X + 1e-12)
+#         f = np.fft.rfftfreq(n, 1 / fs)
+# 
+#         plt.plot(
+#             f / 1e6,
+#             20 * np.log10(np.abs(H) + 1e-12),
+#             label=f"Filter {i}"
+#         )
+# 
+#     plt.title("Filter Frequency Response (Sweep Method)")
+#     plt.xlabel("Frequency (MHz)")
+#     plt.ylabel("Magnitude (dB)")
+#     plt.grid(True)
+#     plt.xlim(0, 10)
+#     plt.legend()
+#     plt.show()
 
 @dataclass
 class AFEParamsPAL8mm(AFEParams8mm):
@@ -172,66 +174,27 @@ class AFEFilterable:
         self.samp_rate = sample_rate
         self.filter_params = filters_params
 
-        d = abs(
-            self.filter_params.LCarrierRef
-            - self.filter_params.RCarrierRef
-        )
-
-        QL = self.filter_params.LCarrierRef / (
-            4 * self.filter_params.VCODeviation
-        )
-        QR = self.filter_params.RCarrierRef / (
-            4 * self.filter_params.VCODeviation
-        )
-
         if channel == 0:
-            b_peak, a_peak = iirpeak(
-                self.filter_params.LCarrierRef,
-                QL,
-                fs=self.samp_rate,
-            )
-
-            b_notch_other, a_notch_other = iirnotch(
-                self.filter_params.RCarrierRef,
-                QR,
-                fs=self.samp_rate,
-            )
-
-            b_notch_image, a_notch_image = iirnotch(
-                self.filter_params.LCarrierRef - d,
-                QR,
-                fs=self.samp_rate,
-            )
+            center = self.filter_params.LCarrierRef
         else:
-            b_peak, a_peak = iirpeak(
-                self.filter_params.RCarrierRef,
-                QR,
-                fs=self.samp_rate,
-            )
+            center = self.filter_params.RCarrierRef
 
-            b_notch_other, a_notch_other = iirnotch(
-                self.filter_params.LCarrierRef,
-                QL,
-                fs=self.samp_rate,
-            )
+        # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
+        bandpass_width = 2 * (self.filter_params.VCODeviation + 36e3)
+        bandpass_low = center - bandpass_width
+        bandpass_high = center + bandpass_width
 
-            b_notch_image, a_notch_image = iirnotch(
-                self.filter_params.RCarrierRef - d,
-                QL,
-                fs=self.samp_rate,
-            )
-
-        self.sos = np.array(
-            [
-                np.r_[b_peak, a_peak],
-                np.r_[b_notch_other, a_notch_other],
-                np.r_[b_notch_image, a_notch_image],
-            ],
-            dtype=DEMOD_DTYPE_NP,
+        self.bandpass = cheby2(
+            N=22,
+            rs=220,
+            Wn=[bandpass_low, bandpass_high],
+            btype="bandpass",
+            fs=sample_rate,
+            output="sos",
         )
 
     def work(self, data):
-        return sosfiltfilt_rust(self.sos, data)
+        return sosfiltfilt_rust(self.bandpass, data)
 
 QUADRATURE_LP_ORDER = 5
 
@@ -1102,8 +1065,7 @@ class HiFiAudioParams:
     headswitch_peak_prominence_limit: int
     headswitch_interpolation_padding: int
     headswitch_interpolation_neighbor_range: int
-    hs_b: float
-    hs_a: float
+    hs_sos: float
     doc_mode: bool
     doc_cutoff_freq: int
     doc_window_size: int
@@ -1178,7 +1140,6 @@ class HiFiDecode:
         )
         self.standard_original = deepcopy(self.standard)
 
-        self.bandpassRF = AFEBandPass(self.standard, self.input_rate)
         a_iirb, a_iira = firdes_lowpass(
             self.if_rate, self.audio_rate * 3 / 4, self.audio_rate / 3, order_limit=10
         )
@@ -1190,13 +1151,11 @@ class HiFiDecode:
         ]
         self.headswitch_passes = 1
         self.headswitch_signal_rate = self.audio_rate
-        self.headswitch_hz = (
-            self.field_rate
-        )  # frequency used to fit peaks to the expected headswitching interval
+        # frequency used to fit peaks to the expected headswitching interval
+        self.headswitch_hz = self.field_rate  
         self.headswitch_drift_hz = self.field_rate * 0.1  # +- 10% drift is normal
-        self.headswitch_cutoff_freq = (
-            25000  # filter cutoff frequency for peak detection
-        )
+        # filter cutoff frequency for peak detection
+        self.headswitch_cutoff_freq = 28000
         # upper limit for peak promience which is used to widen the interpoation boundary
         # when a peak is detected. Head switching peaks may exceed this number; however,
         # the width of the interpolation will only be expanded up to this number.
@@ -1209,13 +1168,14 @@ class HiFiDecode:
         # time range to look for neighboring noise when a head switch event is detected
         # this helps to determine the correct width of the interpolation
         self.headswitch_interpolation_neighbor_range = 200e-6
-        hs_b, hs_a = butter(
-            3,
-            self.headswitch_cutoff_freq / (0.5 * self.headswitch_signal_rate),
+        hs_sos = cheby2(
+            22,
+            rs=200,
+            Wn=self.headswitch_cutoff_freq,
             btype="highpass",
+            output="sos",
+            fs=self.headswitch_signal_rate
         )
-        hs_b = np.float32(hs_b)
-        hs_a = np.float32(hs_a)
 
         # hifi carrier loss results in broadband noise
         # mute the audio when this broadband noise exists above the audible frequencies
@@ -1246,8 +1206,10 @@ class HiFiDecode:
 
         if not bias_guess:
             # defer until carriers can be determined
-            self.bandpassRF = AFEBandPass(self.standard, self.input_rate)
             self.afeL, self.afeR = self._get_afe()
+
+            # plot_responses(self.afeL, self.afeR)
+            # exit()
 
             self.fmL, self.fmR = self._get_fm_demod(
                 self.if_rate, self.options["demod_type"]
@@ -1292,8 +1254,7 @@ class HiFiDecode:
             headswitch_peak_prominence_limit=self.headswitch_peak_prominence_limit,
             headswitch_interpolation_padding=self.headswitch_interpolation_padding,
             headswitch_interpolation_neighbor_range=self.headswitch_interpolation_neighbor_range,
-            hs_b=hs_b,
-            hs_a=hs_a,
+            hs_sos=hs_sos,
             doc_mode=self.doc_mode,
             doc_cutoff_freq=self.doc_cutoff_freq,
             doc_window_size=self.doc_window_size,
@@ -1518,8 +1479,7 @@ class HiFiDecode:
         progressB = TimeProgressBar(len(blocks), len(blocks))
 
         for i in range(len(blocks)):
-            data = self.bandpassRF.work(blocks[i])
-            data = data.astype(REAL_DTYPE, copy=False)
+            data = blocks[i].astype(REAL_DTYPE, copy=False)
 
             data = resample(
                 data,
@@ -1663,8 +1623,8 @@ class HiFiDecode:
         audio_process_params: HiFiAudioParams,
     ) -> Tuple[list[Tuple[float, float, float, float]], np.array, np.array]:
         # remove audible frequencies to avoid detecting them as peaks
-        filtered_signal = filtfilt(
-            audio_process_params.hs_b, audio_process_params.hs_a, audio
+        filtered_signal = sosfiltfilt_rust(
+            audio_process_params.hs_sos, audio
         )
         filtered_signal_abs = abs(filtered_signal)
         filtered_signal_mean, filtered_signal_std_dev = HiFiDecode.mean_stddev(
@@ -2310,14 +2270,6 @@ class HiFiDecode:
         rf_data: np.array,
         measure_perf: bool = False,
     ) -> Tuple[int, np.array, np.array]:
-        # Do a bandpass filter to remove any the video components from the signal.
-        if measure_perf:
-            start_bandpassRF = perf_counter()
-
-        rf_data = self.bandpassRF.work(rf_data)
-        if measure_perf:
-            end_bandpassRF = perf_counter()
-
         # resample from input sample rate to if sample rate
         if measure_perf:
             start_if_resampler = perf_counter()
@@ -2427,7 +2379,6 @@ class HiFiDecode:
         ), f"Audio data must be in {REAL_DTYPE} format, instead got {preR.dtype}"
 
         if measure_perf:
-            duration_bandpassRF = end_bandpassRF - start_bandpassRF
             duration_if_resampler = end_if_resampler - start_if_resampler
             duration_carrier_filter = end_carrier_filter - start_carrier_filter
 
@@ -2481,7 +2432,6 @@ class HiFiDecode:
             duration_stereo_mix = end_stereo_mix - start_stereo_mix
             duration_adjust_gain = end_adjust_gain - start_adjust_gain
             durations = [
-                ("duration_bandpassRF", duration_bandpassRF),
                 ("duration_if_resampler", duration_if_resampler),
                 ("duration_carrier_filter", duration_carrier_filter),
                 ("duration_demod_l", duration_demod_l),
