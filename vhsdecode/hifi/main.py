@@ -704,33 +704,47 @@ class FFMpegFileReader(BufferedInputStream):
 
 
 class AsyncSoundFile(sf.SoundFile):
-    def __init__(
-        self,
-        file,
-        mode,
-        **kwargs
-    ):
+    def __init__(self, file, mode, **kwargs):
         if isinstance(file, str):
             self._file_handle = open(file, "rb")
         else:
             self._file_handle = file
-    
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="hifi_decode_reader"
+        )
+
         self._overlap = np.array([], dtype=np.int16)
+
         super().__init__(
             self._file_handle,
             mode,
-            **kwargs
+            **kwargs,
         )
-
 
     def seek(self, offset, whence=io.SEEK_SET):
         return self._file_handle.seek(offset, whence)
 
     async def buffer_read_into(self, out, dtype="int16"):
-        return await asyncio.to_thread(AsyncSoundFile._buffer_read_into, self._file_handle, out, dtype)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            self._buffer_read_into,
+            self._file_handle,
+            out,
+            dtype,
+        )
 
     def buffer_read_into_sync(self, out, dtype="int16"):
-        return AsyncSoundFile._buffer_read_into(self._file_handle, out, dtype)
+        return self._buffer_read_into(self._file_handle, out, dtype)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            super().close()
+        finally:
+            self._executor.shutdown(wait=True)
+        return False
 
     @staticmethod
     def _buffer_read_into(input, out, dtype):
@@ -738,9 +752,7 @@ class AsyncSoundFile(sf.SoundFile):
         bytes_read = input.readinto(out)
 
         assert bytes_read % item_size == 0, "data is misaligned"
-        bytes_read //= np.dtype(dtype).itemsize
-
-        return bytes_read
+        return bytes_read // item_size
 
 
 class UnSigned16BitFileReader(io.RawIOBase):
