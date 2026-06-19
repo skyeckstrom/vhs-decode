@@ -29,6 +29,7 @@ import numpy as np
 import soundfile as sf
 
 from vhsdecode.hifi.utils import (
+    NUMA,
     DecoderSharedMemory,
     DecoderState,
     PostProcessorSharedMemory,
@@ -1131,6 +1132,7 @@ class PostProcessor:
         out_conn,
         peak_gain
     ):
+        self.numa_node = 0
         self.final_audio_rate = decode_options["audio_rate"]
         self.enable_expander = decode_options["enable_expander"]
         self.enable_deemphasis = decode_options["enable_deemphasis"]
@@ -1159,10 +1161,10 @@ class PostProcessor:
         self.post_processor_num_shared_memory = 16
         for i in range(self.post_processor_num_shared_memory):
             shared_memory = PostProcessorSharedMemory.get_shared_memory(
-                channel_size, f"hifi_post_mem_{i}"
+                channel_size, f"hifi_post_mem_{i}", numa_node=self.numa_node
             )
             self.post_processor_shared_memory.append(shared_memory)
-            self.post_processor_shared_memory_idle_queue.put(shared_memory.name)
+            self.post_processor_shared_memory_idle_queue.put((shared_memory.name, self.numa_node))
             atexit.register(shared_memory.close)
             atexit.register(shared_memory.unlink)
 
@@ -1172,6 +1174,7 @@ class PostProcessor:
             target=PostProcessor.block_sorter_worker,
             name="hifi_block_sort",
             args=(
+                self.numa_node,
                 self.decoder_out_queue,
                 self.decoder_shared_memory_idle_queue,
                 self.blocks_enqueued,
@@ -1189,6 +1192,7 @@ class PostProcessor:
             target=PostProcessor.dc_block_worker,
             name="hifi_dc_block_l",
             args=(
+                self.numa_node,
                 block_sort_l_in_rx,
                 dc_blocker_worker_l_tx,
                 self.final_audio_rate,
@@ -1203,6 +1207,7 @@ class PostProcessor:
             target=PostProcessor.dc_block_worker,
             name="hifi_dc_block_r",
             args=(
+                self.numa_node,
                 block_sort_r_in_rx,
                 dc_blocker_worker_r_tx,
                 self.final_audio_rate,
@@ -1217,6 +1222,7 @@ class PostProcessor:
             target=PostProcessor.spectral_noise_reduction_worker,
             name="hifi_spec_nr_l",
             args=(
+                self.numa_node,
                 dc_blocker_worker_l_rx,
                 spectral_nr_worker_l_tx,
                 self.spectral_nr_amount,
@@ -1232,6 +1238,7 @@ class PostProcessor:
             target=PostProcessor.spectral_noise_reduction_worker,
             name="hifi_spec_nr_r",
             args=(
+                self.numa_node,
                 dc_blocker_worker_r_rx,
                 spectral_nr_worker_r_tx,
                 self.spectral_nr_amount,
@@ -1249,6 +1256,7 @@ class PostProcessor:
             target=expander_worker,
             name="hifi_expander_l",
             args=(
+                self.numa_node,
                 spectral_nr_worker_l_rx,
                 expander_worker_l_out_tx,
                 self.enable_deemphasis,
@@ -1279,6 +1287,7 @@ class PostProcessor:
             target=expander_worker,
             name="hifi_expander_r",
             args=(
+                self.numa_node,
                 spectral_nr_worker_r_rx,
                 expander_worker_r_out_tx,
                 self.enable_deemphasis,
@@ -1308,6 +1317,7 @@ class PostProcessor:
             target=PostProcessor.mix_to_stereo_worker,
             name="hifi_stereo_mix",
             args=(
+                self.numa_node,
                 expander_worker_l_out_rx,
                 expander_worker_r_out_rx,
                 self.mix_to_stereo_worker_output,
@@ -1333,10 +1343,12 @@ class PostProcessor:
 
     @staticmethod
     def dc_block_worker(
+        numa_node,
         in_conn,
         out_conn,
         final_audio_rate
     ):
+        NUMA.bind_process(numa_node)
         setproctitle(current_process().name)
         _ensure_hifi_engine_imported()
         dc_blocker = DCBlocker(
@@ -1367,11 +1379,13 @@ class PostProcessor:
         
     @staticmethod
     def spectral_noise_reduction_worker(
+        numa_node,
         in_conn,
         out_conn,
         spectral_nr_amount,
         final_audio_rate,
     ):
+        NUMA.bind_process(numa_node)
         setproctitle(current_process().name)
         _ensure_hifi_engine_imported()
         spectral_nr = SpectralNoiseReduction(
@@ -1409,6 +1423,7 @@ class PostProcessor:
 
     @staticmethod
     def expander_vhs_worker(
+        numa_node,
         in_conn,
         out_conn,
         enable_deemphasis,
@@ -1429,6 +1444,7 @@ class PostProcessor:
         expander_weighting_low_pass,
         expander_weighting_low_pass_transition,
     ):
+        NUMA.bind_process(numa_node)
         setproctitle(current_process().name)
         _ensure_hifi_engine_imported()
         deemphasis_pre_1 = Deemphasis(
@@ -1500,6 +1516,7 @@ class PostProcessor:
 
     @staticmethod
     def expander_8mm_worker(
+        numa_node,
         in_conn,
         out_conn,
         enable_deemphasis,
@@ -1520,6 +1537,7 @@ class PostProcessor:
         expander_weighting_low_pass,
         expander_weighting_low_pass_transition,
     ):
+        NUMA.bind_process(numa_node)
         setproctitle(current_process().name)
         _ensure_hifi_engine_imported()
         deemphasis_2 = Deemphasis(
@@ -1583,8 +1601,9 @@ class PostProcessor:
 
     @staticmethod
     def mix_to_stereo_worker(
-        expander_l_in_conn, expander_r_in_conn, out_conn, peak_gain, sample_rate
+        numa_node, expander_l_in_conn, expander_r_in_conn, out_conn, peak_gain, sample_rate
     ):
+        NUMA.bind_process(numa_node)
         setproctitle(current_process().name)
         while True:
             while True:
@@ -1679,6 +1698,7 @@ class PostProcessor:
 
     @staticmethod
     def block_sorter_worker(
+        numa_node,
         decoder_out_queue,
         decoder_shared_memory_idle_queue,
         blocks_enqueued,
@@ -1686,6 +1706,7 @@ class PostProcessor:
         l_tx,
         r_tx,
     ):
+        NUMA.bind_process(numa_node)
         setproctitle(current_process().name)
         next_block = 0
         last_block_submitted = -1
@@ -1719,7 +1740,7 @@ class PostProcessor:
 
             buffer.close()
 
-            decoder_shared_memory_idle_queue.put(in_decoder_state.name)
+            decoder_shared_memory_idle_queue.put((in_decoder_state.name, in_decoder_state.numa_node))
             with blocks_enqueued.get_lock():
                 blocks_enqueued.value -= 1
 
@@ -1740,7 +1761,7 @@ class PostProcessor:
                 ):
                     while True:
                         try:
-                            name = post_processor_shared_memory_idle_queue.get()
+                            name, numa_node = post_processor_shared_memory_idle_queue.get()
                             break
                         except InterruptedError:
                             pass
@@ -2029,7 +2050,7 @@ def write_soundfile_process_worker(
                 player.play(stereo_copy)
 
             buffer.close()
-            post_processor_shared_memory_idle_queue.put(decoder_state.name)
+            post_processor_shared_memory_idle_queue.put((decoder_state.name, decoder_state.numa_node))
             with total_samples_decoded.get_lock():
                 total_samples_decoded.value = int(
                     total_samples_decoded.value + samples_decoded
@@ -2099,34 +2120,42 @@ async def decode_parallel(
 
     shared_memory_instances = []
     shared_memory_idle_queue = SimpleQueue()
+    max_numa_node = 0
     for i in range(num_shared_memory_instances):
+        numa_node = NUMA.next_node()
+        if numa_node > max_numa_node:
+            max_numa_node = numa_node
+
         buffer_instance = DecoderSharedMemory.get_shared_memory(
             decoder.initialBlockSize,
             decoder.blockOverlap,
             decoder.initialBlockFinalAudioSize,
             f"hifi_decoder_{i}",
+            numa_node=numa_node
         )
         shared_memory_instances.append(buffer_instance)
-        shared_memory_idle_queue.put(buffer_instance.name)
+        shared_memory_idle_queue.put((buffer_instance.name, numa_node))
 
         atexit.register(buffer_instance.close)
         atexit.register(buffer_instance.unlink)
 
     # spin up the decoders
     decoder_processes: list[Process] = []
-    decoder_in_queue = SimpleQueue()
+    decoder_in_queues = [SimpleQueue() for _ in range(max_numa_node + 1)]
     decoder_out_queue = SimpleQueue()
     decode_done = Event()
 
     for i in range(num_decoders):
+        numa_node = i % (max_numa_node + 1)
         decoder_process = Process(
             target=HiFiDecode.hifi_decode_worker,
             name=f"hifi_decode_worker_{i}",
             args=(
-                decoder_in_queue,
+                decoder_in_queues[numa_node],
                 decoder_out_queue,
                 decode_options,
                 decoder.standard,
+                numa_node
             ),
         )
         decoder_process.start()
@@ -2216,6 +2245,7 @@ async def decode_parallel(
                 new_block_length,
                 decoder_state.block_num,
                 decoder_state.is_last_block,
+                decoder_state.numa_node
             )
             buffer = DecoderSharedMemory(decoder_state)
             block = buffer.get_block()
@@ -2270,7 +2300,8 @@ async def decode_parallel(
 
         # submit the block to the decoder
         # blocks should complete roughly in the order that they are submitted
-        decoder_in_queue.put(decoder_state)
+        numa_node = decoder_state.numa_node
+        decoder_in_queues[numa_node].put(decoder_state)
 
         return decoder_state.is_last_block
 
@@ -2310,7 +2341,7 @@ async def decode_parallel(
             # get the next available shared memory buffer
             while True:
                 try:
-                    buffer_name = await loop.run_in_executor(
+                    buffer_name, numa_node = await loop.run_in_executor(
                         None, shared_memory_idle_queue.get
                     )
                     break
@@ -2320,7 +2351,7 @@ async def decode_parallel(
                     return
 
             decoder_state = DecoderState(
-                decoder, buffer_name, 0, block_size, block_num, False
+                decoder, buffer_name, 0, block_size, block_num, False, numa_node
             )
 
             if len(previous_overlap) == 0:

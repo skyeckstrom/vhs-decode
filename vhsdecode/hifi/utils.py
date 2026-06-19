@@ -10,6 +10,12 @@ from random import SystemRandom
 
 from cProfile import Profile
 import ctypes
+import platform
+import mmap
+import os
+from functools import lru_cache
+from itertools import cycle
+
 from pstats import SortKey, Stats
 
 BLOCK_DTYPE = np.int16
@@ -150,13 +156,143 @@ def check_flac_header_total_samples(streaminfo, file_size):
 
     return False, corrected
 
+
+class NUMA:
+    _lib = None
+
+    class Bitmask(ctypes.Structure):
+        _fields_ = [
+            ("size", ctypes.c_ulong),
+            ("maskp", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    @classmethod
+    def _load_lib(cls):
+        if cls._lib is not None:
+            return cls._lib
+
+        try:
+            lib = ctypes.CDLL("libnuma.so.1")
+
+            lib.numa_available.restype = ctypes.c_int
+            lib.numa_max_node.restype = ctypes.c_int
+            lib.numa_node_to_cpus.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            lib.numa_node_to_cpus.restype = ctypes.c_int
+            lib.numa_run_on_node.argtypes = [ctypes.c_int]
+            lib.numa_set_preferred.argtypes = [ctypes.c_int]
+            lib.numa_tonode_memory.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_int,
+            ]
+
+            cls._lib = lib
+            return lib
+
+        except Exception:
+            cls._lib = None
+            return None
+
+    @classmethod
+    def _available(cls):
+        lib = cls._load_lib()
+        return bool(lib and lib.numa_available() >= 0)
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _nodes(cls):
+        if not cls._available():
+            return cycle([0])
+
+        try:
+            return cycle(list(range(cls._lib.numa_max_node() + 1)))
+        except Exception:
+            return cycle([0])
+
+    @classmethod
+    @lru_cache(maxsize=128)
+    def _cpus_for_node(cls, node: int):
+        if not cls._available():
+            return None
+
+        lib = cls._lib
+        MAX_CPUS = 1024
+
+        words = MAX_CPUS // (8 * ctypes.sizeof(ctypes.c_ulong))
+        mask = (ctypes.c_ulong * words)()
+
+        bm = cls.Bitmask()
+        bm.size = MAX_CPUS
+        bm.maskp = mask
+
+        if lib.numa_node_to_cpus(node, ctypes.byref(bm)) != 0:
+            return None
+
+        cpus = set()
+        bits = 8 * ctypes.sizeof(ctypes.c_ulong)
+
+        for cpu in range(MAX_CPUS):
+            word = mask[cpu // bits]
+            bit = cpu % bits
+            if word & (1 << bit):
+                cpus.add(cpu)
+
+        return cpus
+
+    @classmethod
+    def next_node(cls):
+        return next(cls._nodes())
+
+    @classmethod
+    def bind_process(cls, node: int) -> bool:
+        if not cls._available():
+            return False
+
+        cpus = cls._cpus_for_node(node)
+        if not cpus:
+            return False
+
+        try:
+            os.sched_setaffinity(0, cpus)
+            cls._lib.numa_run_on_node(node)
+            cls._lib.numa_set_preferred(node)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def bind_shared_memory(cls, shm, node: int) -> bool:
+        if platform.system() != "Linux" or not cls._available():
+            return False
+
+        try:
+            lib = cls._lib
+            buf = memoryview(shm.buf)
+            addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+
+            lib.numa_tonode_memory(
+                ctypes.c_void_p(addr),
+                ctypes.c_size_t(len(buf)),
+                ctypes.c_int(node),
+            )
+
+            page = mmap.PAGESIZE
+            for i in range(0, len(buf), page):
+                buf[i] = 0
+
+            return True
+
+        except Exception:
+            return False
+
 @dataclass
 class DecoderState:
-    def __init__(self, decoder, buffer_name, block_frames_read, block_size, block_num, is_last_block):
+    def __init__(self, decoder, buffer_name, block_frames_read, block_size, block_num, is_last_block, numa_node):
         block_sizes = decoder.set_block_sizes(block_size)
         block_overlap = decoder.get_block_overlap()
 
         self.name = buffer_name
+        self.numa_node = numa_node
         self.block_num = block_num
         self.is_last_block = is_last_block
 
@@ -176,6 +312,7 @@ class DecoderState:
         self.block_audio_final_overlap = block_overlap["block_audio_final_overlap"]
 
     name: str
+    numa_node: int
     block_num: int
     is_last_block: bool
 
@@ -220,6 +357,7 @@ class PostProcessorSharedMemory:
         self.close = self.shared_memory.close
         self.unlink = self.shared_memory.unlink
 
+        self.numa_node = decoder_state.numa_node
         self.audio_dtype = decoder_state.audio_dtype
         self.channel_len = decoder_state.block_audio_final_len
         self.audio_dtype_item_size = np.dtype(self.audio_dtype).itemsize
@@ -259,7 +397,7 @@ class PostProcessorSharedMemory:
         self.r_post_bytes = self.r_post_len * self.audio_dtype_item_size
 
     @staticmethod
-    def get_shared_memory(channel_size, name, audio_dtype=REAL_DTYPE):
+    def get_shared_memory(channel_size, name, audio_dtype=REAL_DTYPE, numa_node=None):
         byte_size = (
             to_aligned_offset(channel_size * np.dtype(audio_dtype).itemsize * 4)
             + ALIGNMENT * 16
@@ -272,10 +410,15 @@ class PostProcessorSharedMemory:
             for _ in range(8)
         )
 
+        shm = SharedMemory(size=byte_size, name=name, create=True)
+
+        if numa_node is not None:
+            NUMA.bind_shared_memory(shm, numa_node)
+
         # this instance must be saved in a variable that persists on both processes
         # Windows will remove the shared memory if it garbage collects the handle in any of the processes it is open in
         # https://stackoverflow.com/a/63717188
-        return SharedMemory(size=byte_size, name=name, create=True)
+        return shm
 
     def get_pre_left(self) -> np.array:
         return np.ndarray(
@@ -334,6 +477,7 @@ class DecoderSharedMemory:
         self.close = self.shared_memory.close
         self.unlink = self.shared_memory.unlink
 
+        self.numa_node = decoder_state.numa_node
         self.block_dtype = decoder_state.block_dtype
         self.block_dtype_item_size = np.dtype(self.block_dtype).itemsize
 
@@ -389,6 +533,7 @@ class DecoderSharedMemory:
         name,
         block_dtype=BLOCK_DTYPE,
         audio_dtype=REAL_DTYPE,
+        numa_node=None,
     ):
         max_audio_size = (
             block_audio_final_size + to_aligned_offset(block_audio_final_size)
@@ -404,10 +549,15 @@ class DecoderSharedMemory:
             for _ in range(8)
         )
 
+        shm = SharedMemory(size=byte_size, name=name, create=True)
+
+        if numa_node is not None:
+            NUMA.bind_shared_memory(shm, numa_node)
+
         # this instance must be saved in a variable that persists on both processes
         # Windows will remove the shared memory if it garbage collects the handle in any of the processes it is open in
         # https://stackoverflow.com/a/63717188
-        return SharedMemory(size=byte_size, name=name, create=True)
+        return shm
 
     ## Decoder methods
 
