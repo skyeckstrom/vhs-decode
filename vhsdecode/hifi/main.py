@@ -597,7 +597,7 @@ def test_if_ffmpeg_is_installed():
 class BufferedInputStream(io.RawIOBase):
     def __init__(self, buffer):
         self.buffer = buffer
-        self._pos: int = 0
+        self._pos = 0
 
     def readinto(self, buffer):
         bytes_read = self.buffer.readinto(buffer)
@@ -617,7 +617,7 @@ class BufferedInputStream(io.RawIOBase):
         return False
 
     def close(self):
-        pass
+        return self.buffer.close()
 
     def fileno(self):
         return self.buffer.fileno()
@@ -703,48 +703,39 @@ class FFMpegFileReader(BufferedInputStream):
         self._pos: int = 0
 
 
-class UnseekableSoundFile(sf.SoundFile):
+class AsyncSoundFile(sf.SoundFile):
     def __init__(
         self,
-        file_path,
+        file,
         mode,
-        channels,
-        samplerate,
-        format,
-        subtype,
-        endian,
-        frames_override=None,
+        **kwargs
     ):
-        self.file_path = file_path
+        if isinstance(file, str):
+            self._file_handle = open(file, "rb")
+        else:
+            self._file_handle = file
+    
         self._overlap = np.array([], dtype=np.int16)
-        self._frames_override = frames_override
         super().__init__(
-            file_path,
+            self._file_handle,
             mode,
-            channels=channels,
-            samplerate=samplerate,
-            format=format,
-            subtype=subtype,
-            endian=endian,
+            **kwargs
         )
 
-    @property
-    def frames(self):
-        """Number of frames, overridable for streams where libsndfile
-        cannot know the real length (e.g. piped input)."""
-        if self._frames_override is not None:
-            return self._frames_override
-        return super().frames
 
     def seek(self, offset, whence=io.SEEK_SET):
-        return self.file_path.seek(offset, whence)
+        return self._file_handle.seek(offset, whence)
 
-    def close(self):
-        pass
+    async def buffer_read_into(self, out, dtype="int16"):
+        return await asyncio.to_thread(AsyncSoundFile._buffer_read_into, self._file_handle, out, dtype)
 
-    def buffer_read_into(self, buffer, dtype="int16"):
+    def buffer_read_into_sync(self, out, dtype="int16"):
+        return AsyncSoundFile._buffer_read_into(self._file_handle, out, dtype)
+
+    @staticmethod
+    def _buffer_read_into(input, out, dtype):
         item_size = np.dtype(dtype).itemsize
-        bytes_read = self.file_path.readinto(buffer)
+        bytes_read = input.readinto(out)
 
         assert bytes_read % item_size == 0, "data is misaligned"
         bytes_read //= np.dtype(dtype).itemsize
@@ -796,7 +787,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
     path = pathR.lower()
     extension = pathR.lower().split(".")[-1]
     if "raw" == extension or "s16" == extension:
-        return sf.SoundFile(
+        return AsyncSoundFile(
             pathR,
             "r",
             channels=1,
@@ -806,7 +797,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
             endian="LITTLE",
         )
     elif "u8" == extension or "r8" == extension:
-        return sf.SoundFile(
+        return AsyncSoundFile(
             pathR,
             "r",
             channels=1,
@@ -816,7 +807,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
             endian="LITTLE",
         )
     elif "s8" == extension:
-        return sf.SoundFile(
+        return AsyncSoundFile(
             pathR,
             "r",
             channels=1,
@@ -826,7 +817,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
             endian="LITTLE",
         )
     elif "u16" == extension or "r16" == extension:
-        return UnseekableSoundFile(
+        return AsyncSoundFile(
             UnSigned16BitFileReader(pathR),
             "r",
             channels=1,
@@ -857,7 +848,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
                     print(
                         "WARN: Decoding through the flac command line decoder so the whole file is decoded."
                     )
-                    return UnseekableSoundFile(
+                    return AsyncSoundFile(
                         FlacFileReader(pathR),
                         "r",
                         channels=streaminfo["channels"],
@@ -871,7 +862,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
                     print(
                         "WARN: Decoding through ffmpeg so the whole file is decoded."
                     )
-                    return UnseekableSoundFile(
+                    return AsyncSoundFile(
                         FFMpegFileReader(pathR),
                         "r",
                         channels=streaminfo["channels"],
@@ -885,7 +876,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
                     "WARN: Neither flac nor ffmpeg is installed (or in PATH). The decode will stop early at the wrapped header sample count!"
                 )
         try:
-            return sf.SoundFile(
+            return AsyncSoundFile(
                 pathR,
                 "r",
             )
@@ -906,7 +897,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
                 print(
                     "WARN: Decoding through ffmpeg instead (16-bit left-aligned output)."
                 )
-                return UnseekableSoundFile(
+                return AsyncSoundFile(
                     FFMpegFileReader(pathR),
                     "r",
                     channels=streaminfo["channels"],
@@ -924,7 +915,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
         try:
             for ldf_reader_tool in ("ld-ldf-reader", "ld-ldf-reader-py"):
                 if test_ld_tools(ldf_reader_tool):
-                    return UnseekableSoundFile(
+                    return AsyncSoundFile(
                         LDToolFileReader(ldf_reader_tool, pathR),
                         "r",
                         channels=1,
@@ -943,7 +934,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
         
         try:    
             if test_if_flac_is_installed():
-                return UnseekableSoundFile(
+                return AsyncSoundFile(
                     FlacFileReader(pathR),
                     "r",
                     channels=1,
@@ -953,7 +944,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
                     endian="LITTLE",
                 )
             if test_if_ffmpeg_is_installed():
-                return UnseekableSoundFile(
+                return AsyncSoundFile(
                     FFMpegFileReader(pathR),
                     "r",
                     channels=1,
@@ -965,7 +956,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
         except Exception as e:
             pass
 
-        return sf.SoundFile(
+        return AsyncSoundFile(
             pathR,
             "r",
         )
@@ -976,7 +967,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
                 ("ld-lds-converter", "-i"),
             ):
                 if test_ld_tools(lds_reader_tool):
-                    return UnseekableSoundFile(
+                    return AsyncSoundFile(
                         LDToolFileReader(lds_reader_tool, pathR, input_arg),
                         "r",
                         channels=1,
@@ -994,7 +985,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
             )
     elif "-" == path:
         try:
-            return UnseekableSoundFile(
+            return AsyncSoundFile(
                 BufferedInputStream(sys.stdin.buffer),
                 "r",
                 channels=1,
@@ -1011,7 +1002,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
         print("WARN: Attempting to decode with ffmpeg")
         try:
             if test_if_ffmpeg_is_installed():
-                return UnseekableSoundFile(
+                return AsyncSoundFile(
                     FFMpegFileReader(pathR),
                     "r",
                     channels=1,
@@ -1023,7 +1014,7 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
         except Exception:
             pass
         print("WARN: Attempting to decode with SoundFile")
-        return sf.SoundFile(pathR, "r")
+        return AsyncSoundFile(pathR, "r")
 
 
 def get_normalize_filename(path, sample_rate):
@@ -1035,6 +1026,7 @@ def get_dual_mono_filename(path, channel_suffix):
 
 normalize_parameters = {
     "format": "RAW",  # TODO: update to FLAC 32 bit when supported by soundfile
+    "endian": "little",
     "subtype": "FLOAT",
 }
 
@@ -2168,7 +2160,7 @@ async def decode_parallel(
     atexit.register(output_file_process.terminate)
     atexit.register(output_file_process.join)
 
-    def read_and_send_to_decoder(
+    async def read_and_send_to_decoder(
         f,
         decoder,
         decoder_state,
@@ -2181,7 +2173,7 @@ async def decode_parallel(
         # read input data into the shared memory buffer
         block_in = buffer.get_block_in()
         try:
-            frames_read = f.buffer_read_into(block_in, "int16")
+            frames_read = await f.buffer_read_into(block_in, "int16")
         except sf.LibsndfileError as e:
             print("Error decoding input rf:", e)
             print("Stopping decode...")
@@ -2324,9 +2316,7 @@ async def decode_parallel(
                     decoder_state.block_read_overlap, dtype=np.int16, order="C"
                 )
 
-            is_last_block = await loop.run_in_executor(
-                None,
-                read_and_send_to_decoder,
+            is_last_block = await read_and_send_to_decoder(
                 f,
                 decoder,
                 decoder_state,
@@ -2385,30 +2375,30 @@ async def decode_parallel(
             if decode_options["normalize"]:
                 channel_1_output_file = get_dual_mono_filename(output_file, channel_1_suffix)
                 channel_1_input_file_post_gain = get_normalize_filename(channel_1_output_file, audio_rate)
-                normalize(channel_1_input_file_post_gain, channel_1_output_file, peak_gain.left, 1, audio_rate)
+                await normalize(channel_1_input_file_post_gain, channel_1_output_file, peak_gain.left, 1, audio_rate)
 
             print(f"\nChannel 2: Peak gain is {(peak_gain.right * 100):.2f}%.", end="")
             if decode_options["normalize"]:
                 channel_2_output_file = get_dual_mono_filename(output_file, channel_2_suffix)
                 channel_2_input_file_post_gain = get_normalize_filename(channel_2_output_file, audio_rate)
-                normalize(channel_2_input_file_post_gain, channel_2_output_file, peak_gain.right, 1, audio_rate)
+                await normalize(channel_2_input_file_post_gain, channel_2_output_file, peak_gain.right, 1, audio_rate)
         else:
             peak_gain_stereo = max(peak_gain.left, peak_gain.right)
             print(f"\nPeak gain is {(peak_gain_stereo * 100):.2f}%.", end="")
             if decode_options["normalize"]:
                 input_file_post_gain = get_normalize_filename(output_file, audio_rate)
-                normalize(input_file_post_gain, output_file, peak_gain_stereo, 2, audio_rate)
+                await normalize(input_file_post_gain, output_file, peak_gain_stereo, 2, audio_rate)
 
     elapsed_time = datetime.now() - start_time
     dt_string = elapsed_time.total_seconds()
     print(f"\nDecode finished, seconds elapsed: {round(dt_string)}")
 
-def normalize(input_file_post_gain, output_file, peak_gain, channels, audio_rate):
+async def normalize(input_file_post_gain, output_file, peak_gain, channels, audio_rate):
     try:
         total_frames_read = 0
         buffer = np.empty(2**20, dtype=np.float32, order="C")
 
-        with sf.SoundFile(
+        with AsyncSoundFile(
             input_file_post_gain,
             "r",
             samplerate=int(audio_rate),
@@ -2423,18 +2413,17 @@ def normalize(input_file_post_gain, output_file, peak_gain, channels, audio_rate
             progressB = TimeProgressBar(f.frames, f.frames)
             done = False
             while not done:
-                frames_read = f.buffer_read_into(buffer, dtype="float32")
-                samples_read = frames_read * channels
+                frames_read = await f.buffer_read_into(buffer, dtype="float32")
 
-                if samples_read < len(buffer):
-                    buffer = buffer[0:samples_read]
+                if frames_read < len(buffer):
+                    buffer = buffer[0:frames_read]
                     done = True
 
                 PostProcessor.normalize(gain_adjust, buffer, buffer)
                 w.buffer_write(buffer, "float32")
 
                 total_frames_read += frames_read
-                progressB.print(total_frames_read, False)
+                progressB.print(total_frames_read / 2, False)
         print("")
     finally:
         os.remove(input_file_post_gain)
@@ -2446,7 +2435,7 @@ def guess_bias(decoder, input_file, block_size, blocks_limits=10):
     with as_soundfile(input_file) as f:
         while f.tell() < f.frames and len(blocks) <= blocks_limits:
             block_buffer = np.empty(block_size, dtype=np.int16, order="C")
-            f.buffer_read_into(block_buffer, "int16")
+            f.buffer_read_into_sync(block_buffer, "int16")
             blocks.append(block_buffer)
 
     decoder.guessBiases(blocks)
