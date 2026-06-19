@@ -205,7 +205,9 @@ class NUMA:
             return cycle([0])
 
         try:
-            return cycle(list(range(cls._lib.numa_max_node() + 1)))
+            max_node = cls._lib.numa_max_node()
+            nodes = [n for n in range(max_node + 1) if cls._cpus_for_node(n)]
+            return cycle(nodes or [0])
         except Exception:
             return cycle([0])
 

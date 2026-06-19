@@ -2202,7 +2202,7 @@ class HiFiDecode:
             start_if_resampler = perf_counter()
 
         if self.options["demod_type"] == DEMOD_HILBERT:
-            rf_data = rf_data.astype(np.float32, copy=False)
+            rf_data = rf_data.astype(REAL_DTYPE, copy=False)
             rf_data_resampled = self.if_resampler.resample_chunk(rf_data, True)
             self.if_resampler.clear()
         else:
