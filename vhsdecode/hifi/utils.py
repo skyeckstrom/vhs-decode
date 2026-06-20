@@ -512,7 +512,6 @@ class DecoderSharedMemory:
             for _ in range(8)
         )
 
-
         # this instance must be saved in a variable that persists on both processes
         # Windows will remove the shared memory if it garbage collects the handle in any of the processes it is open in
         # https://stackoverflow.com/a/63717188

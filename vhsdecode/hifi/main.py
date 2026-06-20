@@ -831,13 +831,19 @@ def as_soundfile(pathR):
             input_format
         )
     elif "flac" == extension:
-        if test_if_ffmpeg_is_installed():
-            return AsyncReader(
-                FFMpegFileReader(pathR),
-                DEFAULT_BLOCK_DTYPE
-            )
-        else:
+        try:
             return AsyncSoundFileReader(pathR)
+        except sf.LibsndfileError as e:
+            print(f"WARN: libsndfile could not open this FLAC file: {e}")
+            if test_if_ffmpeg_is_installed():
+                return AsyncReader(
+                    FFMpegFileReader(pathR),
+                    DEFAULT_BLOCK_DTYPE
+                )
+            else:
+                print(
+                    "ERROR: ffmpeg is not installed (or not in PATH), cannot decode this FLAC bit depth."
+                )
     elif "ldf" == extension:
         try:
             for ldf_reader_tool in ("ld-ldf-reader", "ld-ldf-reader-py"):
@@ -2093,7 +2099,7 @@ async def decode_parallel(
 
         if block_num == 0:
             # save the read data
-            block_data_read = buffer.get_block_in().copy()
+            block_data_read = block_in.copy()
             buffer.close()
 
             # shift the actual data down by half so only the copied data is discarded
@@ -2148,11 +2154,11 @@ async def decode_parallel(
                 previous_overlap, block_in_overlap, len(block_in_overlap)
             )
 
-            # copy the the current overlap to use in the next iteration
-            current_overlap = buffer.get_block_in_end_overlap()
-            DecoderSharedMemory.copy_data(
-                current_overlap, previous_overlap, len(current_overlap)
-            )
+        # copy the the current overlap to use in the next iteration
+        current_overlap = buffer.get_block_in_end_overlap()
+        DecoderSharedMemory.copy_data(
+            current_overlap, previous_overlap, len(current_overlap)
+        )
 
         if not decoder_state.is_last_block:
             # save the full block for the next iteration, including previous overlap
