@@ -37,9 +37,6 @@ from vhsdecode.hifi.utils import (
     PeakGain,
     BLOCK_DTYPE,
     REAL_DTYPE,
-    FLAC_TOTAL_SAMPLES_FIELD_MOD,
-    check_flac_header_total_samples,
-    parse_flac_streaminfo,
 )
 
 import argparse
@@ -657,6 +654,7 @@ class FlacFileReader(BufferedInputStream):
             "-d",
             "-c",
             "-s",
+            "-F",
             "--force-raw-format",
             "--endian",
             "little",
@@ -684,6 +682,7 @@ class FFMpegFileReader(BufferedInputStream):
             "-loglevel",
             "error",
             "-ignore_unknown",
+            "-fflags", "nobuffer",
             "-i",
             file_path,
             "-f",
@@ -840,90 +839,21 @@ def as_soundfile(pathR, sample_rate=DEFAULT_FINAL_AUDIO_RATE):
             endian="LITTLE",
         )
     elif "flac" == extension:
-        streaminfo = parse_flac_streaminfo(pathR)
-        if streaminfo is not None:
-            header_ok, corrected_total = check_flac_header_total_samples(
-                streaminfo, os.path.getsize(pathR)
+        if test_if_ffmpeg_is_installed():
+            return AsyncSoundFile(
+                FFMpegFileReader(pathR),
+                "r",
+                channels=1,
+                samplerate=int(sample_rate),
+                format="RAW",
+                subtype="PCM_16",
+                endian="LITTLE"
             )
-            if not header_ok:
-                declared = streaminfo["total_samples"]
-                print(
-                    f"WARN: The FLAC header sample count ({declared}) does not match the amount of audio data in the file."
-                )
-                print(
-                    f"WARN: The FLAC STREAMINFO total_samples field is 36 bits wide and wraps around every {FLAC_TOTAL_SAMPLES_FIELD_MOD} samples on very long captures."
-                )
-                if corrected_total is not None:
-                    print(
-                        f"WARN: Estimated true length of this capture is {corrected_total} samples."
-                    )
-                if streaminfo["bits_per_sample"] == 16 and test_if_flac_is_installed():
-                    print(
-                        "WARN: Decoding through the flac command line decoder so the whole file is decoded."
-                    )
-                    return AsyncSoundFile(
-                        FlacFileReader(pathR),
-                        "r",
-                        channels=streaminfo["channels"],
-                        samplerate=int(sample_rate),
-                        format="RAW",
-                        subtype="PCM_16",
-                        endian="LITTLE",
-                        frames_override=corrected_total,
-                    )
-                if test_if_ffmpeg_is_installed():
-                    print(
-                        "WARN: Decoding through ffmpeg so the whole file is decoded."
-                    )
-                    return AsyncSoundFile(
-                        FFMpegFileReader(pathR),
-                        "r",
-                        channels=streaminfo["channels"],
-                        samplerate=int(sample_rate),
-                        format="RAW",
-                        subtype="PCM_16",
-                        endian="LITTLE",
-                        frames_override=corrected_total,
-                    )
-                print(
-                    "WARN: Neither flac nor ffmpeg is installed (or in PATH). The decode will stop early at the wrapped header sample count!"
-                )
-        try:
+        else:
             return AsyncSoundFile(
                 pathR,
                 "r",
             )
-        except sf.LibsndfileError as e:
-            # libsndfile only implements FLAC bit depths 8/16/24/32. Native
-            # 12-bit FLAC captures (e.g. MISRC) fail to open with
-            # "unimplemented format"; ffmpeg decodes them fine and emits
-            # 16-bit left-aligned samples (value << 4), bit-identical to the
-            # same capture padded to 16 bits at record time.
-            if streaminfo is None:
-                raise
-            print(f"WARN: libsndfile could not open this FLAC file: {e}")
-            print(
-                f"WARN: FLAC stream is {streaminfo['bits_per_sample']}-bit "
-                f"({streaminfo['channels']} channel(s))."
-            )
-            if test_if_ffmpeg_is_installed():
-                print(
-                    "WARN: Decoding through ffmpeg instead (16-bit left-aligned output)."
-                )
-                return AsyncSoundFile(
-                    FFMpegFileReader(pathR),
-                    "r",
-                    channels=streaminfo["channels"],
-                    samplerate=int(sample_rate),
-                    format="RAW",
-                    subtype="PCM_16",
-                    endian="LITTLE",
-                    frames_override=streaminfo["total_samples"] or None,
-                )
-            print(
-                "ERROR: ffmpeg is not installed (or not in PATH), cannot decode this FLAC bit depth."
-            )
-            raise
     elif "ldf" == extension:
         try:
             for ldf_reader_tool in ("ld-ldf-reader", "ld-ldf-reader-py"):
