@@ -86,13 +86,24 @@ class FiltersClass:
 @dataclass
 class AFEParamsVHS:
     def __init__(self):
-        self.VCODeviation = 150e3
+        self.LVCODeviation = 150e3
+        self.RVCODeviation = 150e3
+
+        # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
+        self.LNotchWidth = 2 * (self.LVCODeviation + 36e3)
+        self.RNotchWidth = 2 * (self.RVCODeviation + 36e3)
 
 
 @dataclass
 class AFEParams8mm:
     def __init__(self):
-        self.VCODeviation = 100e3
+        # IEC 60843-1 6.2.3
+        self.LVCODeviation = 100e3 # main channel deviation +-100kHz
+        self.RVCODeviation = 50e3 # sub channel deviation +-50kHz
+
+        self.LNotchWidth = 2 * (self.LVCODeviation + 20e3)
+        self.RNotchWidth = 1.5 * self.RVCODeviation # narrower notch for sub channel
+
         self.LCarrierRef = 1.5e6
         self.RCarrierRef = 1.7e6
 
@@ -120,47 +131,6 @@ class AFEParamsNTSC8mm(AFEParams8mm):
         super().__init__()
         self.Hfreq = 15.750e3
 
-# from scipy.signal import chirp
-# def plot_responses(*filters, n=2**20):
-#     plt.figure()
-# 
-#     # time axis
-#     t = np.arange(n)
-# 
-#     for i, filt in enumerate(filters):
-# 
-#         fs = filt.samp_rate
-#         t_sec = t / fs
-# 
-#         # log sweep from DC-ish to Nyquist (adjust as needed)
-#         f0 = 10          # start freq (Hz)
-#         f1 = fs / 2 * 0.9  # end freq (Hz)
-# 
-#         x = chirp(t_sec, f0=f0, f1=f1, t1=t_sec[-1], method='logarithmic')
-# 
-#         # run through filter
-#         y = filt.work(x)
-# 
-#         # FFT-based transfer estimate
-#         X = np.fft.rfft(x)
-#         Y = np.fft.rfft(y)
-# 
-#         H = Y / (X + 1e-12)
-#         f = np.fft.rfftfreq(n, 1 / fs)
-# 
-#         plt.plot(
-#             f / 1e6,
-#             20 * np.log10(np.abs(H) + 1e-12),
-#             label=f"Filter {i}"
-#         )
-# 
-#     plt.title("Filter Frequency Response (Sweep Method)")
-#     plt.xlabel("Frequency (MHz)")
-#     plt.ylabel("Magnitude (dB)")
-#     plt.grid(True)
-#     plt.xlim(0, 10)
-#     plt.legend()
-#     plt.show()
 
 @dataclass
 class AFEParamsPAL8mm(AFEParams8mm):
@@ -169,18 +139,61 @@ class AFEParamsPAL8mm(AFEParams8mm):
         self.Hfreq = 15.625e3
 
 
+from scipy.signal import chirp
+def plot_responses(*filters, n=2**20):
+    plt.figure()
+
+    # time axis
+    t = np.arange(n)
+
+    for i, filt in enumerate(filters):
+
+        fs = filt.samp_rate
+        t_sec = t / fs
+
+        # log sweep from DC-ish to Nyquist (adjust as needed)
+        f0 = 10          # start freq (Hz)
+        f1 = fs / 2 * 0.9  # end freq (Hz)
+
+        x = chirp(t_sec, f0=f0, f1=f1, t1=t_sec[-1], method='logarithmic')
+
+        # run through filter
+        y = filt.work(x)
+
+        # FFT-based transfer estimate
+        X = np.fft.rfft(x)
+        Y = np.fft.rfft(y)
+
+        H = Y / (X + 1e-12)
+        f = np.fft.rfftfreq(n, 1 / fs)
+
+        plt.plot(
+            f / 1e6,
+            20 * np.log10(np.abs(H) + 1e-12),
+            label=f"Filter {i}"
+        )
+
+    plt.title("Filter Frequency Response (Sweep Method)")
+    plt.xlabel("Frequency (MHz)")
+    plt.ylabel("Magnitude (dB)")
+    plt.grid(True)
+    plt.xlim(0, 10)
+    plt.legend()
+    plt.show()
+
+
 class AFEFilterable:
     def __init__(self, filters_params, sample_rate, channel=0):
         self.samp_rate = sample_rate
         self.filter_params = filters_params
 
         if channel == 0:
+            bandpass_width = self.filter_params.LNotchWidth
             center = self.filter_params.LCarrierRef
         else:
+            bandpass_width = self.filter_params.RNotchWidth
             center = self.filter_params.RCarrierRef
 
-        # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
-        bandpass_width = 2 * (self.filter_params.VCODeviation + 36e3)
         bandpass_low = center - bandpass_width
         bandpass_high = center + bandpass_width
 
@@ -1074,6 +1087,7 @@ class HiFiDecode:
             options["format"],
             options["standard"],
             options["afe_vco_deviation"],
+            options["afe_vco_deviation"], # TODO: add user facing parameter to specify right deviation
             options["afe_left_carrier"],
             options["afe_right_carrier"],
         )
@@ -1202,7 +1216,7 @@ class HiFiDecode:
 
     @staticmethod
     def get_standard(
-        format, system, afe_vco_deviation, afe_left_carrier, afe_right_carrier
+        format, system, afe_left_vco_deviation, afe_right_vco_deviation, afe_left_carrier, afe_right_carrier
     ):
         if format == "vhs":
             if system == "p":
@@ -1219,8 +1233,10 @@ class HiFiDecode:
                 field_rate = 59.94
                 standard = AFEParamsNTSC8mm()
 
-        if afe_vco_deviation != 0:
-            standard.VCODeviation = afe_vco_deviation
+        if afe_left_vco_deviation != 0:
+            standard.LVCODeviation = afe_left_vco_deviation
+        if afe_right_vco_deviation != 0:
+            standard.RVCODeviation = afe_right_vco_deviation
         if afe_left_carrier != 0:
             standard.LCarrierRef = afe_left_carrier
         if afe_right_carrier != 0:
@@ -1373,14 +1389,14 @@ class HiFiDecode:
             FMDiscriminator(
                 if_rate,
                 self.standard.LCarrierRef,
-                self.standard.VCODeviation,
+                self.standard.LVCODeviation,
                 self.initialBlockResampledSize,
                 demod_type
             ),
             FMDiscriminator(
                 if_rate,
                 self.standard.RCarrierRef,
-                self.standard.VCODeviation,
+                self.standard.RVCODeviation,
                 self.initialBlockResampledSize,
                 demod_type
             )
@@ -1436,8 +1452,8 @@ class HiFiDecode:
             meanL.push(np.mean(preL))
             meanR.push(np.mean(preR))
 
-            meanLResult = meanL.pull() * self.standard.VCODeviation
-            meanRResult = meanR.pull() * self.standard.VCODeviation
+            meanLResult = meanL.pull() * self.standard.LVCODeviation
+            meanRResult = meanR.pull() * self.standard.RVCODeviation
 
             progressB.label = "Carrier L %.06f MHz, R %.06f MHz" % (
                 meanLResult / 10e5,
@@ -1507,7 +1523,7 @@ class HiFiDecode:
     ) -> Tuple[AFEFilterable, AFEFilterable, FMDiscriminator, FMDiscriminator]:
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_R:
             left_carrier_dc_offset = (
-                self.standard.LCarrierRef - dcL * self.standard.VCODeviation
+                self.standard.LCarrierRef - dcL * self.standard.LVCODeviation
             )
             left_carrier_updated = self.standard.LCarrierRef - round(left_carrier_dc_offset)
             self.standard.LCarrierRef = max(
@@ -1517,7 +1533,7 @@ class HiFiDecode:
             
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_L:
             right_carrier_dc_offset = (
-                self.standard.RCarrierRef - dcR * self.standard.VCODeviation
+                self.standard.RCarrierRef - dcR * self.standard.RVCODeviation
             )
             right_carrier_updated = self.standard.RCarrierRef - round(
                 right_carrier_dc_offset
