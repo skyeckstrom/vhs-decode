@@ -196,7 +196,7 @@ class AFEFilterable:
     def work(self, data):
         return sosfiltfilt_rust(self.bandpass, data)
 
-class FMdemod:
+class FMDiscriminator:
     def __init__(
         self, sample_rate, carrier_center, deviation, max_iq_len, type
     ):
@@ -213,7 +213,7 @@ class FMdemod:
             iq_len = self._get_min_iq_length(max_iq_len)
             self.i_osc = np.empty(iq_len, dtype=DEMOD_DTYPE_NP, order="C")
             self.q_osc = np.empty(iq_len, dtype=DEMOD_DTYPE_NP, order="C")
-            FMdemod._generate_iq_oscillators(
+            FMDiscriminator._generate_iq_oscillators(
                 self.i_osc,
                 self.q_osc,
                 self.carrier,
@@ -387,41 +387,47 @@ class FMdemod:
         two_pi = 2 * pi
         phase_scale = sample_rate / (two_pi * deviation)
         carrier_scaled = carrier / deviation
+
         iq_len = len(i_osc)
         rf_len = len(in_rf)
-        prev_angle = 0  # doesn't matter since the final chunks have overlap
-        prev_unwrapped = prev_angle
+
+        # sign always start positive, iq index always starts at 0
+        prev_i = in_rf[0] * i_osc[0]
+        prev_q = in_rf[0] * q_osc[0]
 
         for i in range(1, rf_len):
-            #
-            # mix in i/q, reflect the sine and cosine
-            #
+            # i/q is only the positive side of the wave, and only one half rotation is stored
+            # * the index of the buffer loops around twice for one full rotation
             iq_index = i % iq_len
+            # * sign flips between the first and second loop (1st rotation: positive; 2nd rotation: negative)
             sign = 1 - 2 * ((i // iq_len) & 1)
-
+            # * flip the rf sign, to avoid extra multiplications below
             rf_signed = in_rf[i] * sign
+
             i_in = rf_signed * i_osc[iq_index]
             q_in = rf_signed * q_osc[iq_index]
 
-            #
-            # unwrap angles
-            #
-            current_angle = atan2(q_in, i_in)
-            delta = current_angle - prev_angle
-            delta += two_pi * ((delta < -pi) - (delta > pi))
-            unwrapped = prev_unwrapped + delta
+            # complex-conjugate discriminator, avoids phase error accumulation when wrapping the phase with amplitude
+            imag = q_in * prev_i - i_in * prev_q
+            real = i_in * prev_i + q_in * prev_q
 
+            # angular difference
+            delta = atan2(imag, real)
+
+            # scale up for later steps (may be able to be removed)
             out = carrier_scaled + delta * phase_scale
 
             out_demod[i - 1] = min(max(out, min_float), max_float)
 
-            prev_angle = current_angle
-            prev_unwrapped = unwrapped
+            prev_i = i_in
+            prev_q = q_in
 
+    # estimate carrier frequency deviation from phase changes in the I/Q reference frame
+    # which is like a series of +- values for clean signal, i.e. a fixed carrair wave)
     def work(self, input: np.array, output: np.array):
         if self.type == DEMOD_HILBERT:
-            FMdemod.compute_analytic_signal(input)
-            FMdemod.demod_hilbert(
+            FMDiscriminator.compute_analytic_signal(input)
+            FMDiscriminator.demod_hilbert(
                 input,
                 output,
                 self.min_float,
@@ -430,7 +436,7 @@ class FMdemod:
                 self.deviation,
             )
         elif self.type == DEMOD_QUADRATURE:
-            FMdemod.demod_quadrature(
+            FMDiscriminator.demod_quadrature(
                 input,
                 output,
                 self.min_float,
@@ -1364,14 +1370,14 @@ class HiFiDecode:
 
     def _get_fm_demod(self, if_rate, demod_type):
         return (
-            FMdemod(
+            FMDiscriminator(
                 if_rate,
                 self.standard.LCarrierRef,
                 self.standard.VCODeviation,
                 self.initialBlockResampledSize,
                 demod_type
             ),
-            FMdemod(
+            FMDiscriminator(
                 if_rate,
                 self.standard.RCarrierRef,
                 self.standard.VCODeviation,
@@ -1498,7 +1504,7 @@ class HiFiDecode:
 
     def auto_fine_tune(
         self, dcL: float, dcR: float
-    ) -> Tuple[AFEFilterable, AFEFilterable, FMdemod, FMdemod]:
+    ) -> Tuple[AFEFilterable, AFEFilterable, FMDiscriminator, FMDiscriminator]:
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_R:
             left_carrier_dc_offset = (
                 self.standard.LCarrierRef - dcL * self.standard.VCODeviation
@@ -2125,7 +2131,7 @@ class HiFiDecode:
 
     @staticmethod
     def demod_process_audio(
-        filtered: np.array, fm: FMdemod, audio_process_params: HiFiAudioParams, audio_resampler, measure_perf: bool
+        filtered: np.array, fm: FMDiscriminator, audio_process_params: HiFiAudioParams, audio_resampler, measure_perf: bool
     ) -> Tuple[np.array, float, dict]:
         perf_measurements = {
             "start_demod": 0,
@@ -2144,11 +2150,13 @@ class HiFiDecode:
         if measure_perf:
             perf_measurements["start_demod"] = perf_counter()
         audio = np.empty(len(filtered), dtype=REAL_DTYPE, order="C")
+
+        # estimate carrier frequency deviation from phase changes in the I/Q reference frame
         fm.work(filtered, audio)
         if measure_perf:
             perf_measurements["end_demod"] = perf_counter()
 
-        # resample if sample rate to audio sample rate
+        # band-limited sinc interpolation to audio rate (i.e. downsample from IF rate to audio rate)
         if measure_perf:
             perf_measurements["start_audio_resample"] = perf_counter()
         audio: np.array = audio_resampler.resample_chunk(audio, True)
