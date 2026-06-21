@@ -1222,7 +1222,7 @@ class PostProcessor:
         _ensure_hifi_engine_imported()
         dc_blocker = DCBlocker(
             final_audio_rate,
-            8
+            1
         )
 
         while True:
@@ -1240,6 +1240,10 @@ class PostProcessor:
                 pre = buffer.get_pre_left()
             else:
                 pre = buffer.get_pre_right()
+
+            if decoder_state.block_num == 0:
+                # prime the state
+                dc_blocker.process(pre.copy())
 
             dc_blocker.process(pre)
 

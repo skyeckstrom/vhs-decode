@@ -86,12 +86,39 @@ class FiltersClass:
 @dataclass
 class AFEParamsVHS:
     def __init__(self):
+        # IEC 60774-2 pg.13 (5.4 Recording characteristics, Frequency deviation)
         self.LVCODeviation = 150e3
         self.RVCODeviation = 150e3
 
         # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
-        self.LNotchWidth = 2 * (self.LVCODeviation + 36e3)
-        self.RNotchWidth = 2 * (self.RVCODeviation + 36e3)
+        notch_padding = 35.753125e3
+        self.LNotchWidth = 2 * (self.LVCODeviation + notch_padding)
+        self.RNotchWidth = 2 * (self.RVCODeviation + notch_padding)
+
+        # Notch Padding Tuning Procedure:
+        # 1. Get the baseline data
+        #    a. Pick a test sample. Ideally one that has high fidelity, high frequencies, or sibilance (a tape with noisy 's').
+        #    b. Decode Before Change:
+        #       * `Decode A`: Decode the sample with the original parameter
+        #    c. Pick an initial direction you think the parameter needs to be tuned to
+        #    d. Open Audacity, or an editor of your choice
+        # 2. Tune the parameter
+        #    a. Change the parameter in the code
+        #    b. Decode After Change:
+        #       * `Decode B`: Decode the sample with the changed parameter
+        #    c. Import the two audio files (before and after)
+        #       * Must be same length, and have the same amplitude
+        #    d. Reduce amplitude of `Decode A` and `Decode A` by -6db
+        #    e. Mix down `Decode A` and `Decode A` to create `Decode A + `Decode B`
+        #    f. Invert phase of `Decode A + `Decode B`
+        #    g. Increase amplitude of `Decode A` and `Decode A` by +6db
+        #    h. Mix down `Decode A` and `Decode A + `Decode B` to create `Decode B - Decode A`
+        #    i. Visually inspect `Decode B - Decode A` against `Decode A` and `Decode B` to determine which sample adds more noise
+        #       * Any noise that appears in the subtraction only exists in one of the two clips
+        #    j. After deciding which clip is better, pick a new parameter that is closer to the better clip
+        #       * When narrowing in between two parameters, a bisect search helps to speed up the process
+        #    k. With the new parameter, go to step `a` and repeat until you've completed the bisect search
+        #       * Generally `Decode B` will become your new baseline (`Decode A`)
 
 
 @dataclass
@@ -672,46 +699,75 @@ class SpectralNoiseReduction:
 
 class DCBlocker:
     def __init__(self, sample_rate, cutoff):
-        # Compute pole R so cutoff is approximately fc Hz:
-        R = 1 - (2 * np.pi * cutoff) / sample_rate
-        if R < 0:
-            R = 0
-        if R > 0.999999:
-            R = 0.999999  # numerical stability
+        stages = 3
 
-        self.R = R
+        # Per-stage cutoff scaling (correct cascade compensation)
+        scale = 1.0 / np.sqrt(2.0**(1.0 / stages) - 1.0)
+        stage_cutoff = cutoff * scale
 
-        # State
-        self.prev_x = 0.0
-        self.prev_y = 0.0
+        self.R = np.exp(-2 * np.pi * stage_cutoff / sample_rate)
+
+        # Stage 1 state
+        self.x1 = np.float64(0.0)
+        self.y1 = np.float64(0.0)
+
+        # Stage 2 state
+        self.x2 = np.float64(0.0)
+        self.y2 = np.float64(0.0)
+
+        # Stage 3 state
+        self.x3 = np.float64(0.0)
+        self.y3 = np.float64(0.0)
 
     @staticmethod
     @njit(
         [
-            numba.types.UniTuple(numba.types.float32, 2)(
+            numba.types.UniTuple(numba.types.float64, 6)(
                 NumbaAudioArray,
-                numba.types.float32,
-                numba.types.float32,
-                numba.types.float32
+                numba.types.float64,
+                numba.types.float64,
+                numba.types.float64,
+                numba.types.float64,
+                numba.types.float64,
+                numba.types.float64,
+                numba.types.float64
             )
         ],
         cache=True,
         fastmath=True,
         nogil=True,
     )
-    def dc_block(audio, px, py, R):
-        for i in range(len(audio)):
-            y = audio[i] - px + R * py
+    def dc_block(audio, x1, y1, x2, y2, x3, y3, R):
+        for i in range(audio.shape[0]):
+            x = audio[i]
 
-            px = audio[i]
-            py = y
+            # Stage 1
+            y1_new = x - x1 + R * y1
+            x1 = x
+            y1 = y1_new
 
-            audio[i] = y
+            # Stage 2
+            y2_new = y1_new - x2 + R * y2
+            x2 = y1_new
+            y2 = y2_new
 
-        return px, py
+            # Stage 3
+            y3_new = y2_new - x3 + R * y3
+            x3 = y2_new
+            y3 = y3_new
+
+            audio[i] = y3_new
+
+        return x1, y1, x2, y2, x3, y3
 
     def process(self, audio):
-        self.prev_x, self.prev_y = DCBlocker.dc_block(audio, self.prev_x, self.prev_y, self.R)
+        self.x1, self.y1, self.x2, self.y2, self.x3, self.y3 = self.dc_block(
+            audio,
+            self.x1, self.y1,
+            self.x2, self.y2,
+            self.x3, self.y3,
+            self.R,
+        )
 
 class Deemphasis:
     def __init__(
