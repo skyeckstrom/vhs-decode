@@ -86,13 +86,24 @@ class FiltersClass:
 @dataclass
 class AFEParamsVHS:
     def __init__(self):
-        self.VCODeviation = 150e3
+        self.LVCODeviation = 150e3
+        self.RVCODeviation = 150e3
+
+        # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
+        self.LNotchWidth = 2 * (self.LVCODeviation + 36e3)
+        self.RNotchWidth = 2 * (self.RVCODeviation + 36e3)
 
 
 @dataclass
 class AFEParams8mm:
     def __init__(self):
-        self.VCODeviation = 100e3
+        # IEC 60843-1 pg.71 (6.2.3 FM audio signal recording, Maximum deviation)
+        self.LVCODeviation = 100e3 # main channel deviation +-100kHz
+        self.RVCODeviation = 50e3 # sub channel deviation +-50kHz
+
+        self.LNotchWidth = 2 * (self.LVCODeviation + 20e3)
+        self.RNotchWidth = 1.5 * self.RVCODeviation # narrower notch for sub channel
+
         self.LCarrierRef = 1.5e6
         self.RCarrierRef = 1.7e6
 
@@ -120,47 +131,6 @@ class AFEParamsNTSC8mm(AFEParams8mm):
         super().__init__()
         self.Hfreq = 15.750e3
 
-# from scipy.signal import chirp
-# def plot_responses(*filters, n=2**20):
-#     plt.figure()
-# 
-#     # time axis
-#     t = np.arange(n)
-# 
-#     for i, filt in enumerate(filters):
-# 
-#         fs = filt.samp_rate
-#         t_sec = t / fs
-# 
-#         # log sweep from DC-ish to Nyquist (adjust as needed)
-#         f0 = 10          # start freq (Hz)
-#         f1 = fs / 2 * 0.9  # end freq (Hz)
-# 
-#         x = chirp(t_sec, f0=f0, f1=f1, t1=t_sec[-1], method='logarithmic')
-# 
-#         # run through filter
-#         y = filt.work(x)
-# 
-#         # FFT-based transfer estimate
-#         X = np.fft.rfft(x)
-#         Y = np.fft.rfft(y)
-# 
-#         H = Y / (X + 1e-12)
-#         f = np.fft.rfftfreq(n, 1 / fs)
-# 
-#         plt.plot(
-#             f / 1e6,
-#             20 * np.log10(np.abs(H) + 1e-12),
-#             label=f"Filter {i}"
-#         )
-# 
-#     plt.title("Filter Frequency Response (Sweep Method)")
-#     plt.xlabel("Frequency (MHz)")
-#     plt.ylabel("Magnitude (dB)")
-#     plt.grid(True)
-#     plt.xlim(0, 10)
-#     plt.legend()
-#     plt.show()
 
 @dataclass
 class AFEParamsPAL8mm(AFEParams8mm):
@@ -169,18 +139,61 @@ class AFEParamsPAL8mm(AFEParams8mm):
         self.Hfreq = 15.625e3
 
 
+from scipy.signal import chirp
+def plot_responses(*filters, n=2**20):
+    plt.figure()
+
+    # time axis
+    t = np.arange(n)
+
+    for i, filt in enumerate(filters):
+
+        fs = filt.samp_rate
+        t_sec = t / fs
+
+        # log sweep from DC-ish to Nyquist (adjust as needed)
+        f0 = 10          # start freq (Hz)
+        f1 = fs / 2 * 0.9  # end freq (Hz)
+
+        x = chirp(t_sec, f0=f0, f1=f1, t1=t_sec[-1], method='logarithmic')
+
+        # run through filter
+        y = filt.work(x)
+
+        # FFT-based transfer estimate
+        X = np.fft.rfft(x)
+        Y = np.fft.rfft(y)
+
+        H = Y / (X + 1e-12)
+        f = np.fft.rfftfreq(n, 1 / fs)
+
+        plt.plot(
+            f / 1e6,
+            20 * np.log10(np.abs(H) + 1e-12),
+            label=f"Filter {i}"
+        )
+
+    plt.title("Filter Frequency Response (Sweep Method)")
+    plt.xlabel("Frequency (MHz)")
+    plt.ylabel("Magnitude (dB)")
+    plt.grid(True)
+    plt.xlim(0, 10)
+    plt.legend()
+    plt.show()
+
+
 class AFEFilterable:
     def __init__(self, filters_params, sample_rate, channel=0):
         self.samp_rate = sample_rate
         self.filter_params = filters_params
 
         if channel == 0:
+            bandpass_width = self.filter_params.LNotchWidth
             center = self.filter_params.LCarrierRef
         else:
+            bandpass_width = self.filter_params.RNotchWidth
             center = self.filter_params.RCarrierRef
 
-        # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
-        bandpass_width = 2 * (self.filter_params.VCODeviation + 36e3)
         bandpass_low = center - bandpass_width
         bandpass_high = center + bandpass_width
 
@@ -196,7 +209,7 @@ class AFEFilterable:
     def work(self, data):
         return sosfiltfilt_rust(self.bandpass, data)
 
-class FMdemod:
+class FMDiscriminator:
     def __init__(
         self, sample_rate, carrier_center, deviation, max_iq_len, type
     ):
@@ -213,7 +226,7 @@ class FMdemod:
             iq_len = self._get_min_iq_length(max_iq_len)
             self.i_osc = np.empty(iq_len, dtype=DEMOD_DTYPE_NP, order="C")
             self.q_osc = np.empty(iq_len, dtype=DEMOD_DTYPE_NP, order="C")
-            FMdemod._generate_iq_oscillators(
+            FMDiscriminator._generate_iq_oscillators(
                 self.i_osc,
                 self.q_osc,
                 self.carrier,
@@ -387,41 +400,47 @@ class FMdemod:
         two_pi = 2 * pi
         phase_scale = sample_rate / (two_pi * deviation)
         carrier_scaled = carrier / deviation
+
         iq_len = len(i_osc)
         rf_len = len(in_rf)
-        prev_angle = 0  # doesn't matter since the final chunks have overlap
-        prev_unwrapped = prev_angle
+
+        # sign always start positive, iq index always starts at 0
+        prev_i = in_rf[0] * i_osc[0]
+        prev_q = in_rf[0] * q_osc[0]
 
         for i in range(1, rf_len):
-            #
-            # mix in i/q, reflect the sine and cosine
-            #
+            # i/q is only the positive side of the wave, and only one half rotation is stored
+            # * the index of the buffer loops around twice for one full rotation
             iq_index = i % iq_len
+            # * sign flips between the first and second loop (1st rotation: positive; 2nd rotation: negative)
             sign = 1 - 2 * ((i // iq_len) & 1)
-
+            # * flip the rf sign, to avoid extra multiplications below
             rf_signed = in_rf[i] * sign
+
             i_in = rf_signed * i_osc[iq_index]
             q_in = rf_signed * q_osc[iq_index]
 
-            #
-            # unwrap angles
-            #
-            current_angle = atan2(q_in, i_in)
-            delta = current_angle - prev_angle
-            delta += two_pi * ((delta < -pi) - (delta > pi))
-            unwrapped = prev_unwrapped + delta
+            # complex-conjugate discriminator, avoids phase error accumulation when wrapping the phase with amplitude
+            imag = q_in * prev_i - i_in * prev_q
+            real = i_in * prev_i + q_in * prev_q
 
+            # angular difference
+            delta = atan2(imag, real)
+
+            # scale up for later steps (may be able to be removed)
             out = carrier_scaled + delta * phase_scale
 
             out_demod[i - 1] = min(max(out, min_float), max_float)
 
-            prev_angle = current_angle
-            prev_unwrapped = unwrapped
+            prev_i = i_in
+            prev_q = q_in
 
+    # estimate carrier frequency deviation from phase changes in the I/Q reference frame
+    # which is like a series of +- values for clean signal, i.e. a fixed carrair wave)
     def work(self, input: np.array, output: np.array):
         if self.type == DEMOD_HILBERT:
-            FMdemod.compute_analytic_signal(input)
-            FMdemod.demod_hilbert(
+            FMDiscriminator.compute_analytic_signal(input)
+            FMDiscriminator.demod_hilbert(
                 input,
                 output,
                 self.min_float,
@@ -430,7 +449,7 @@ class FMdemod:
                 self.deviation,
             )
         elif self.type == DEMOD_QUADRATURE:
-            FMdemod.demod_quadrature(
+            FMDiscriminator.demod_quadrature(
                 input,
                 output,
                 self.min_float,
@@ -818,15 +837,6 @@ class Expander:
 
         self.hold_state = 0
 
-        self.lowpass_iirb, self.lowpass_iira = firdes_lowpass(
-            self.audio_rate,
-            min(weighting_low_pass, self.audio_rate / 2 - 1), # limit to nyquist
-            weighting_low_pass_transition,
-        )
-        self.WeightedLowcut = FiltersClass(
-            np.array(self.lowpass_iirb), np.array(self.lowpass_iira), dtype=np.float64
-        )
-
         # weighted filter for envelope detector
         self.weighting_T1 = weighting_low_tau
         self.weighting_T2 = weighting_high_tau
@@ -857,7 +867,7 @@ class Expander:
     @njit(
         [(
             NumbaAudioArray,
-            numba.types.Array(numba.types.float64, 1, "C"),
+            numba.types.Array(numba.types.float32, 1, "C"),
             numba.types.float64,
             numba.types.float64,
             numba.types.float64,
@@ -941,11 +951,9 @@ class Expander:
         return env_lin, hold_state
 
     def process(self, pre_in, audio_out):
-        side_chain = self.WeightedLowcut.lfilt(pre_in)
-
         # high pass weighted input to envelope detector
         self.zi_x, self.zi_y = Deemphasis.lfilt_inplace(
-            side_chain,
+            pre_in,
             self.env_iirb[0],
             self.env_iirb[1],
             self.env_iira[1],
@@ -955,7 +963,7 @@ class Expander:
 
         self.env_lin, self.hold_state = Expander.expand(
             audio_out,
-            side_chain,
+            pre_in,
             self.env_lin,
             self.atkCoeff,
             self.relCoeff,
@@ -1068,6 +1076,7 @@ class HiFiDecode:
             options["format"],
             options["standard"],
             options["afe_vco_deviation"],
+            options["afe_vco_deviation"], # TODO: add user facing parameter to specify right deviation
             options["afe_left_carrier"],
             options["afe_right_carrier"],
         )
@@ -1196,7 +1205,7 @@ class HiFiDecode:
 
     @staticmethod
     def get_standard(
-        format, system, afe_vco_deviation, afe_left_carrier, afe_right_carrier
+        format, system, afe_left_vco_deviation, afe_right_vco_deviation, afe_left_carrier, afe_right_carrier
     ):
         if format == "vhs":
             if system == "p":
@@ -1213,8 +1222,10 @@ class HiFiDecode:
                 field_rate = 59.94
                 standard = AFEParamsNTSC8mm()
 
-        if afe_vco_deviation != 0:
-            standard.VCODeviation = afe_vco_deviation
+        if afe_left_vco_deviation != 0:
+            standard.LVCODeviation = afe_left_vco_deviation
+        if afe_right_vco_deviation != 0:
+            standard.RVCODeviation = afe_right_vco_deviation
         if afe_left_carrier != 0:
             standard.LCarrierRef = afe_left_carrier
         if afe_right_carrier != 0:
@@ -1364,17 +1375,17 @@ class HiFiDecode:
 
     def _get_fm_demod(self, if_rate, demod_type):
         return (
-            FMdemod(
+            FMDiscriminator(
                 if_rate,
                 self.standard.LCarrierRef,
-                self.standard.VCODeviation,
+                self.standard.LVCODeviation,
                 self.initialBlockResampledSize,
                 demod_type
             ),
-            FMdemod(
+            FMDiscriminator(
                 if_rate,
                 self.standard.RCarrierRef,
-                self.standard.VCODeviation,
+                self.standard.RVCODeviation,
                 self.initialBlockResampledSize,
                 demod_type
             )
@@ -1430,8 +1441,8 @@ class HiFiDecode:
             meanL.push(np.mean(preL))
             meanR.push(np.mean(preR))
 
-            meanLResult = meanL.pull() * self.standard.VCODeviation
-            meanRResult = meanR.pull() * self.standard.VCODeviation
+            meanLResult = meanL.pull() * self.standard.LVCODeviation
+            meanRResult = meanR.pull() * self.standard.RVCODeviation
 
             progressB.label = "Carrier L %.06f MHz, R %.06f MHz" % (
                 meanLResult / 10e5,
@@ -1498,10 +1509,10 @@ class HiFiDecode:
 
     def auto_fine_tune(
         self, dcL: float, dcR: float
-    ) -> Tuple[AFEFilterable, AFEFilterable, FMdemod, FMdemod]:
+    ) -> Tuple[AFEFilterable, AFEFilterable, FMDiscriminator, FMDiscriminator]:
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_R:
             left_carrier_dc_offset = (
-                self.standard.LCarrierRef - dcL * self.standard.VCODeviation
+                self.standard.LCarrierRef - dcL * self.standard.LVCODeviation
             )
             left_carrier_updated = self.standard.LCarrierRef - round(left_carrier_dc_offset)
             self.standard.LCarrierRef = max(
@@ -1511,7 +1522,7 @@ class HiFiDecode:
             
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_L:
             right_carrier_dc_offset = (
-                self.standard.RCarrierRef - dcR * self.standard.VCODeviation
+                self.standard.RCarrierRef - dcR * self.standard.RVCODeviation
             )
             right_carrier_updated = self.standard.RCarrierRef - round(
                 right_carrier_dc_offset
@@ -2125,7 +2136,7 @@ class HiFiDecode:
 
     @staticmethod
     def demod_process_audio(
-        filtered: np.array, fm: FMdemod, audio_process_params: HiFiAudioParams, audio_resampler, measure_perf: bool
+        filtered: np.array, fm: FMDiscriminator, audio_process_params: HiFiAudioParams, audio_resampler, measure_perf: bool
     ) -> Tuple[np.array, float, dict]:
         perf_measurements = {
             "start_demod": 0,
@@ -2144,11 +2155,13 @@ class HiFiDecode:
         if measure_perf:
             perf_measurements["start_demod"] = perf_counter()
         audio = np.empty(len(filtered), dtype=REAL_DTYPE, order="C")
+
+        # estimate carrier frequency deviation from phase changes in the I/Q reference frame
         fm.work(filtered, audio)
         if measure_perf:
             perf_measurements["end_demod"] = perf_counter()
 
-        # resample if sample rate to audio sample rate
+        # band-limited sinc interpolation to audio rate (i.e. downsample from IF rate to audio rate)
         if measure_perf:
             perf_measurements["start_audio_resample"] = perf_counter()
         audio: np.array = audio_resampler.resample_chunk(audio, True)
@@ -2202,7 +2215,7 @@ class HiFiDecode:
             start_if_resampler = perf_counter()
 
         if self.options["demod_type"] == DEMOD_HILBERT:
-            rf_data = rf_data.astype(np.float32, copy=False)
+            rf_data = rf_data.astype(REAL_DTYPE, copy=False)
             rf_data_resampled = self.if_resampler.resample_chunk(rf_data, True)
             self.if_resampler.clear()
         else:
@@ -2371,7 +2384,7 @@ class HiFiDecode:
 
     @staticmethod
     def hifi_decode_worker(
-        decoder_in_queue, decoder_out_queue, decode_options, standard
+        decoder_in_queue, decoder_out_queue, decode_options, standard, numa_node
     ):
         setproctitle(current_process().name)
         measure_perf = False
