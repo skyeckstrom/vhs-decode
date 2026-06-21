@@ -86,12 +86,39 @@ class FiltersClass:
 @dataclass
 class AFEParamsVHS:
     def __init__(self):
+        # IEC 60774-2 pg.13 (5.4 Recording characteristics, Frequency deviation)
         self.LVCODeviation = 150e3
         self.RVCODeviation = 150e3
 
         # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
-        self.LNotchWidth = 2 * (self.LVCODeviation + 35.753125e3)
-        self.RNotchWidth = 2 * (self.RVCODeviation + 35.753125e3)
+        notch_padding = 35.753125e3
+        self.LNotchWidth = 2 * (self.LVCODeviation + notch_padding)
+        self.RNotchWidth = 2 * (self.RVCODeviation + notch_padding)
+
+        # Notch Padding Tuning Procedure:
+        # 1. Get the baseline data
+        #    a. Pick a test sample. Ideally one that has high fidelity, high frequencies, or sibilance (a tape with noisy 's').
+        #    b. Decode Before Change:
+        #       * `Decode A`: Decode the sample with the original parameter
+        #    c. Pick an initial direction you think the parameter needs to be tuned to
+        #    d. Open Audacity, or an editor of your choice
+        # 2. Tune the parameter
+        #    a. Change the parameter in the code
+        #    b. Decode After Change:
+        #       * `Decode B`: Decode the sample with the changed parameter
+        #    c. Import the two audio files (before and after)
+        #       * Must be same length, and have the same amplitude
+        #    d. Reduce amplitude of `Decode A` and `Decode A` by -6db
+        #    e. Mix down `Decode A` and `Decode A` to create `Decode A + `Decode B`
+        #    f. Invert phase of `Decode A + `Decode B`
+        #    g. Increase amplitude of `Decode A` and `Decode A` by +6db
+        #    h. Mix down `Decode A` and `Decode A + `Decode B` to create `Decode B - Decode A`
+        #    i. Visually inspect `Decode B - Decode A` against `Decode A` and `Decode B` to determine which sample adds more noise
+        #       * Any noise that appears in the subtraction only exists in one of the two clips
+        #    j. After deciding which clip is better, pick a new parameter that is closer to the better clip
+        #       * When narrowing in between two parameters, a bisect search helps to speed up the process
+        #    k. With the new parameter, go to step `a` and repeat until you've completed the bisect search
+        #       * Generally `Decode B` will become your new baseline (`Decode A`)
 
 
 @dataclass
