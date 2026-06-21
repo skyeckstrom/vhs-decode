@@ -1222,7 +1222,7 @@ class PostProcessor:
         _ensure_hifi_engine_imported()
         dc_blocker = DCBlocker(
             final_audio_rate,
-            8
+            1
         )
 
         while True:
