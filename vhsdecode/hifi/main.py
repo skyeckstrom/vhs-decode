@@ -332,7 +332,7 @@ demod_options.add_argument(
     dest="auto_fine_tune",
     metavar='',
     type=str.lower,
-    default="on",
+    default="off",
     help="Set auto tuning of the analog front end on/off",
 )
 demod_options.add_argument(

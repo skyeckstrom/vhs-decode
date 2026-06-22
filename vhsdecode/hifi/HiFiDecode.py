@@ -316,6 +316,7 @@ class FMDiscriminator:
                 numba.types.float32,
                 numba.types.float32,
                 numba.types.float32,
+                numba.types.int32,
                 numba.types.int32
             ),
             (
@@ -324,6 +325,7 @@ class FMDiscriminator:
                 numba.types.float32,
                 numba.types.float32,
                 numba.types.float32,
+                numba.types.int32,
                 numba.types.int32
             ),
             (
@@ -332,6 +334,7 @@ class FMDiscriminator:
                 numba.types.float32,
                 numba.types.float32,
                 numba.types.float32,
+                numba.types.int32,
                 numba.types.int32
             ),
         ],
@@ -339,13 +342,14 @@ class FMDiscriminator:
         fastmath=True,
         nogil=True,
     )
-    def demod_hilbert(analytic_signal, output, min_float, max_float, sample_rate, deviation):
+    def demod_hilbert(analytic_signal, output, min_float, max_float, sample_rate, carrier, deviation):
         two_pi = 2 * pi
         analytic_signal_value = 0
         analytic_signal_value_prev = 0
         discont = pi
         ph_correct = 0
         ph_correct_prev = 0
+        carrier_scale = carrier / deviation
 
         i = 1
         instantaneous_frequency_len = len(output)
@@ -378,7 +382,7 @@ class FMDiscriminator:
 
             # FMdemod.unwrap_hilbert
             out = (ph_correct - ph_correct_prev) / two_pi * sample_rate / deviation # np.diff(instantaneous_phase) / (2.0 * pi) * sample_rate
-            output[i - 1] = max(min_float, min(max_float, out))
+            output[i - 1] = max(min_float, min(max_float, out - carrier_scale))
             ph_correct_prev = ph_correct
             i += 1
 
@@ -394,7 +398,6 @@ class FMDiscriminator:
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.int32,
                 numba.types.int32,
-                numba.types.int32,
             ),
             (
                 numba.types.Array(numba.types.float32, 1, "A"),
@@ -403,7 +406,6 @@ class FMDiscriminator:
                 numba.types.float32,
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
                 numba.types.Array(DEMOD_DTYPE_NB, 1, "C"),
-                numba.types.int32,
                 numba.types.int32,
                 numba.types.int32,
             ),
@@ -420,13 +422,11 @@ class FMDiscriminator:
         i_osc,
         q_osc,
         sample_rate,
-        carrier,
         deviation,
     ):
         # constants
         two_pi = 2 * pi
         phase_scale = sample_rate / (two_pi * deviation)
-        carrier_scaled = carrier / deviation
 
         iq_len = len(i_osc)
         rf_len = len(in_rf)
@@ -454,8 +454,8 @@ class FMDiscriminator:
             # angular difference
             delta = atan2(imag, real)
 
-            # scale up for later steps (may be able to be removed)
-            out = carrier_scaled + delta * phase_scale
+            # scale up to deviation
+            out = delta * phase_scale
 
             out_demod[i - 1] = min(max(out, min_float), max_float)
 
@@ -473,6 +473,7 @@ class FMDiscriminator:
                 self.min_float,
                 self.max_float,
                 np.float32(self.sample_rate),
+                self.carrier,
                 self.deviation,
             )
         elif self.type == DEMOD_QUADRATURE:
@@ -484,7 +485,6 @@ class FMDiscriminator:
                 self.i_osc,
                 self.q_osc,
                 self.sample_rate,
-                self.carrier,
                 self.deviation,
             )
 
@@ -1497,8 +1497,8 @@ class HiFiDecode:
             meanL.push(np.mean(preL))
             meanR.push(np.mean(preR))
 
-            meanLResult = meanL.pull() * self.standard.LVCODeviation
-            meanRResult = meanR.pull() * self.standard.RVCODeviation
+            meanLResult = meanL.pull() * self.standard.LVCODeviation + self.standard.LCarrierRef + 1e6
+            meanRResult = meanR.pull() * self.standard.RVCODeviation + self.standard.RCarrierRef + 1e6
 
             progressB.label = "Carrier L %.06f MHz, R %.06f MHz" % (
                 meanLResult / 10e5,
@@ -1516,9 +1516,9 @@ class HiFiDecode:
 
         return meanLResult, meanRResult
 
-    def log_bias(self):
-        devL = (self.standard_original.LCarrierRef - self.standard.LCarrierRef) / 1e3
-        devR = (self.standard_original.RCarrierRef - self.standard.RCarrierRef) / 1e3
+    def log_bias(self, dcL, dcR):
+        devL = dcL * self.standard.LVCODeviation / 1e3
+        devR = dcR * self.standard.RVCODeviation / 1e3
 
         if self.audio_process_params.decode_mode == AUDIO_MODE_MONO_L:
             print("Bias L %.02f kHz" % (devL), end=" ")
@@ -1567,34 +1567,19 @@ class HiFiDecode:
         self, dcL: float, dcR: float
     ) -> Tuple[AFEFilterable, AFEFilterable, FMDiscriminator, FMDiscriminator]:
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_R:
-            left_carrier_dc_offset = (
-                self.standard.LCarrierRef - dcL * self.standard.LVCODeviation
-            )
-            left_carrier_updated = self.standard.LCarrierRef - round(left_carrier_dc_offset)
-            self.standard.LCarrierRef = max(
-                min(left_carrier_updated, self.standard_original.LCarrierRef + 10e3),
-                self.standard_original.LCarrierRef - 10e3,
-            )
+            left_carrier_updated = round(self.standard_original.LCarrierRef + dcL * self.standard.LVCODeviation)
+
+            self.standard.LCarrierRef = min(max(left_carrier_updated, self.standard_original.LCarrierRef - 10e3), self.standard_original.LCarrierRef + 10e3)
             
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_L:
-            right_carrier_dc_offset = (
-                self.standard.RCarrierRef - dcR * self.standard.RVCODeviation
-            )
-            right_carrier_updated = self.standard.RCarrierRef - round(
-                right_carrier_dc_offset
-            )
-            self.standard.RCarrierRef = max(
-                min(right_carrier_updated, self.standard_original.RCarrierRef + 10e3),
-                self.standard_original.RCarrierRef - 10e3,
-            )
+            right_carrier_updated = round(self.standard_original.RCarrierRef + dcR * self.standard.RVCODeviation)
 
-        # auto fine tune can't adjust quadrature demodulation since the i/q oscillators are generated once, disabling for now
-        # use the --bg option to adjust for bias at the beginning of the decode
-        if self.options["demod_type"] == DEMOD_HILBERT:
-            self.afeL, self.afeR = self._get_afe()
-            self.fmL, self.fmR = self._get_fm_demod(
-                self.if_rate, self.options["demod_type"]
-            )
+            self.standard.RCarrierRef = min(max(right_carrier_updated, self.standard_original.RCarrierRef - 10e3), self.standard_original.RCarrierRef + 10e3)
+
+        self.afeL, self.afeR = self._get_afe()
+        self.fmL, self.fmR = self._get_fm_demod(
+            self.if_rate, self.options["demod_type"]
+        )
 
     @staticmethod
     @njit(
@@ -2333,9 +2318,10 @@ class HiFiDecode:
             start_auto_fine_tune = perf_counter()
         if self.options["auto_fine_tune"]:
             self.auto_fine_tune(dcL, dcR)
-            self.log_bias()
         if measure_perf:
             end_auto_fine_tune = perf_counter()
+
+        self.log_bias(dcL, dcR)
 
         # mix for various stereo modes
         if measure_perf:
