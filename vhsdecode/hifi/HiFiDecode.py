@@ -166,6 +166,37 @@ class AFEParamsPAL8mm(AFEParams8mm):
         self.Hfreq = 15.625e3
 
 
+@staticmethod
+def get_standard(
+    format, system, afe_left_vco_deviation, afe_right_vco_deviation, afe_left_carrier, afe_right_carrier
+):
+    if format == "vhs":
+        if system == "p":
+            field_rate = 50
+            standard = AFEParamsPALVHS()
+        elif system == "n":
+            field_rate = 59.94
+            standard = AFEParamsNTSCVHS()
+    elif format == "8mm":
+        if system == "p":
+            field_rate = 50
+            standard = AFEParamsPAL8mm()
+        elif system == "n":
+            field_rate = 59.94
+            standard = AFEParamsNTSC8mm()
+
+    if afe_left_vco_deviation != 0:
+        standard.LVCODeviation = afe_left_vco_deviation
+    if afe_right_vco_deviation != 0:
+        standard.RVCODeviation = afe_right_vco_deviation
+    if afe_left_carrier != 0:
+        standard.LCarrierRef = afe_left_carrier
+    if afe_right_carrier != 0:
+        standard.RCarrierRef = afe_right_carrier
+
+    return standard, field_rate
+
+
 from scipy.signal import chirp
 def plot_responses(*filters, n=2**20):
     plt.figure()
@@ -1128,11 +1159,11 @@ class HiFiDecode:
         self.set_block_sizes()
         self._set_block_overlap()
 
-        self.standard, self.field_rate = HiFiDecode.get_standard(
+        self.standard, self.field_rate = get_standard(
             options["format"],
             options["standard"],
-            options["afe_vco_deviation"],
-            options["afe_vco_deviation"], # TODO: add user facing parameter to specify right deviation
+            options["afe_left_vco_deviation"],
+            options["afe_right_vco_deviation"],
             options["afe_left_carrier"],
             options["afe_right_carrier"],
         )
@@ -1258,36 +1289,6 @@ class HiFiDecode:
             doc_fft_start=self.doc_fft_start,
             doc_fft_end=self.doc_fft_end,
         )
-
-    @staticmethod
-    def get_standard(
-        format, system, afe_left_vco_deviation, afe_right_vco_deviation, afe_left_carrier, afe_right_carrier
-    ):
-        if format == "vhs":
-            if system == "p":
-                field_rate = 50
-                standard = AFEParamsPALVHS()
-            elif system == "n":
-                field_rate = 59.94
-                standard = AFEParamsNTSCVHS()
-        elif format == "8mm":
-            if system == "p":
-                field_rate = 50
-                standard = AFEParamsPAL8mm()
-            elif system == "n":
-                field_rate = 59.94
-                standard = AFEParamsNTSC8mm()
-
-        if afe_left_vco_deviation != 0:
-            standard.LVCODeviation = afe_left_vco_deviation
-        if afe_right_vco_deviation != 0:
-            standard.RVCODeviation = afe_right_vco_deviation
-        if afe_left_carrier != 0:
-            standard.LCarrierRef = afe_left_carrier
-        if afe_right_carrier != 0:
-            standard.RCarrierRef = afe_right_carrier
-
-        return standard, field_rate
 
     def calculate_block_sizes(self, block_size=None):
         # block overlap and edge discard
