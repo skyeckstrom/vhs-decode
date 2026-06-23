@@ -87,13 +87,13 @@ class FiltersClass:
 class AFEParamsVHS:
     def __init__(self):
         # IEC 60774-2 pg.13 (5.4 Recording characteristics, Frequency deviation)
-        self.LVCODeviation = 150e3
-        self.RVCODeviation = 150e3
+        self.LCarrierDeviation = 150e3
+        self.RCarrierDeviation = 150e3
 
         # Carson's bandwidth rule: 2 * (peak_frequency_deviation + highest frequency)
         notch_padding = 35.753125e3
-        self.LNotchWidth = 2 * (self.LVCODeviation + notch_padding)
-        self.RNotchWidth = 2 * (self.RVCODeviation + notch_padding)
+        self.LNotchWidth = 2 * (self.LCarrierDeviation + notch_padding)
+        self.RNotchWidth = 2 * (self.RCarrierDeviation + notch_padding)
 
         # Notch Padding Tuning Procedure:
         # 1. Get the baseline data
@@ -125,11 +125,11 @@ class AFEParamsVHS:
 class AFEParams8mm:
     def __init__(self):
         # IEC 60843-1 pg.71 (6.2.3 FM audio signal recording, Maximum deviation)
-        self.LVCODeviation = 100e3 # main channel deviation +-100kHz
-        self.RVCODeviation = 50e3 # sub channel deviation +-50kHz
+        self.LCarrierDeviation = 100e3 # main channel deviation +-100kHz
+        self.RCarrierDeviation = 50e3 # sub channel deviation +-50kHz
 
-        self.LNotchWidth = 2 * (self.LVCODeviation + 20e3)
-        self.RNotchWidth = 1.5 * self.RVCODeviation # narrower notch for sub channel
+        self.LNotchWidth = 2 * (self.LCarrierDeviation + 20e3)
+        self.RNotchWidth = 1.5 * self.RCarrierDeviation # narrower notch for sub channel
 
         self.LCarrierRef = 1.5e6
         self.RCarrierRef = 1.7e6
@@ -168,7 +168,7 @@ class AFEParamsPAL8mm(AFEParams8mm):
 
 @staticmethod
 def get_standard(
-    format, system, afe_left_vco_deviation, afe_right_vco_deviation, afe_left_carrier, afe_right_carrier
+    format, system, afe_left_carrier_deviation, afe_right_carrier_deviation, afe_left_carrier, afe_right_carrier
 ):
     if format == "vhs":
         if system == "p":
@@ -185,10 +185,10 @@ def get_standard(
             field_rate = 59.94
             standard = AFEParamsNTSC8mm()
 
-    if afe_left_vco_deviation != 0:
-        standard.LVCODeviation = afe_left_vco_deviation
-    if afe_right_vco_deviation != 0:
-        standard.RVCODeviation = afe_right_vco_deviation
+    if afe_left_carrier_deviation != 0:
+        standard.LCarrierDeviation = afe_left_carrier_deviation
+    if afe_right_carrier_deviation != 0:
+        standard.RCarrierDeviation = afe_right_carrier_deviation
     if afe_left_carrier != 0:
         standard.LCarrierRef = afe_left_carrier
     if afe_right_carrier != 0:
@@ -1162,8 +1162,8 @@ class HiFiDecode:
         self.standard, self.field_rate = get_standard(
             options["format"],
             options["standard"],
-            options["afe_left_vco_deviation"],
-            options["afe_right_vco_deviation"],
+            options["afe_left_carrier_deviation"],
+            options["afe_right_carrier_deviation"],
             options["afe_left_carrier"],
             options["afe_right_carrier"],
         )
@@ -1435,14 +1435,14 @@ class HiFiDecode:
             FMDiscriminator(
                 if_rate,
                 self.standard.LCarrierRef,
-                self.standard.LVCODeviation,
+                self.standard.LCarrierDeviation,
                 self.initialBlockResampledSize,
                 demod_type
             ),
             FMDiscriminator(
                 if_rate,
                 self.standard.RCarrierRef,
-                self.standard.RVCODeviation,
+                self.standard.RCarrierDeviation,
                 self.initialBlockResampledSize,
                 demod_type
             )
@@ -1498,8 +1498,8 @@ class HiFiDecode:
             meanL.push(np.mean(preL))
             meanR.push(np.mean(preR))
 
-            meanLResult = meanL.pull() * self.standard.LVCODeviation + self.standard.LCarrierRef + 1e6
-            meanRResult = meanR.pull() * self.standard.RVCODeviation + self.standard.RCarrierRef + 1e6
+            meanLResult = meanL.pull() * self.standard.LCarrierDeviation + self.standard.LCarrierRef + 1e6
+            meanRResult = meanR.pull() * self.standard.RCarrierDeviation + self.standard.RCarrierRef + 1e6
 
             progressB.label = "Carrier L %.06f MHz, R %.06f MHz" % (
                 meanLResult / 10e5,
@@ -1518,8 +1518,8 @@ class HiFiDecode:
         return meanLResult, meanRResult
 
     def log_bias(self, dcL, dcR):
-        devL = dcL * self.standard.LVCODeviation / 1e3
-        devR = dcR * self.standard.RVCODeviation / 1e3
+        devL = dcL * self.standard.LCarrierDeviation / 1e3
+        devR = dcR * self.standard.RCarrierDeviation / 1e3
 
         if self.audio_process_params.decode_mode == AUDIO_MODE_MONO_L:
             print("Bias L %.02f kHz" % (devL), end=" ")
@@ -1568,12 +1568,12 @@ class HiFiDecode:
         self, dcL: float, dcR: float
     ) -> Tuple[AFEFilterable, AFEFilterable, FMDiscriminator, FMDiscriminator]:
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_R:
-            left_carrier_updated = round(self.standard_original.LCarrierRef + dcL * self.standard.LVCODeviation)
+            left_carrier_updated = round(self.standard_original.LCarrierRef + dcL * self.standard.LCarrierDeviation)
 
             self.standard.LCarrierRef = min(max(left_carrier_updated, self.standard_original.LCarrierRef - 10e3), self.standard_original.LCarrierRef + 10e3)
             
         if self.audio_process_params.decode_mode != AUDIO_MODE_MONO_L:
-            right_carrier_updated = round(self.standard_original.RCarrierRef + dcR * self.standard.RVCODeviation)
+            right_carrier_updated = round(self.standard_original.RCarrierRef + dcR * self.standard.RCarrierDeviation)
 
             self.standard.RCarrierRef = min(max(right_carrier_updated, self.standard_original.RCarrierRef - 10e3), self.standard_original.RCarrierRef + 10e3)
 

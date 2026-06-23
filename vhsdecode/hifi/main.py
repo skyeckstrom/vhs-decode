@@ -327,12 +327,12 @@ demod_options.add_argument(
     help="Overrides the left carrier center frequency.",
 )
 demod_options.add_argument(
-    "--AFE_left_vco_deviation",
-    dest="afe_left_vco_deviation",
+    "--AFE_left_carrier_deviation",
+    dest="afe_left_carrier_deviation",
     metavar='',
     type=parse_frequency,
     default=0,
-    help="Overrides the left VCO maximum deviation. This represents the maximum frequency offset + or - from the center frequency.",
+    help="Overrides the left carrier maximum deviation. This represents the maximum frequency offset + or - from the center frequency.",
 )
 demod_options.add_argument(
     "--AFE_right_carrier",
@@ -343,12 +343,12 @@ demod_options.add_argument(
     help="Overrides the right carrier center frequency.",
 )
 demod_options.add_argument(
-    "--AFE_right_vco_deviation",
-    dest="afe_right_vco_deviation",
+    "--AFE_right_carrier_deviation",
+    dest="afe_right_carrier_deviation",
     metavar='',
     type=parse_frequency,
     default=0,
-    help="Overrides the right VCO maximum deviation. This represents the maximum frequency offset + or - from the center frequency.",
+    help="Overrides the right carrier maximum deviation. This represents the maximum frequency offset + or - from the center frequency.",
 )
 
 audio_processing_options_group = parser.add_argument_group("Audio processing options")
@@ -1853,8 +1853,8 @@ def build_decode_options_from_args(args):
         "preview": args.preview,
         "preview_available": _sounddevice_available() if args.preview else False,
         "demod_type": args.demod_type,
-        "afe_left_vco_deviation": args.afe_left_vco_deviation * 10e5,
-        "afe_right_vco_deviation": args.afe_right_vco_deviation * 10e5,
+        "afe_left_carrier_deviation": args.afe_left_carrier_deviation * 10e5,
+        "afe_right_carrier_deviation": args.afe_right_carrier_deviation * 10e5,
         "afe_left_carrier": args.afe_left_carrier * 10e5,
         "afe_right_carrier": args.afe_right_carrier * 10e5,
         "resampler_quality": resampler_quality if not args.preview else "low",
