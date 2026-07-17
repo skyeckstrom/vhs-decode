@@ -1853,13 +1853,8 @@ class FieldNTSCShared(FieldShared, ldd.FieldNTSC):
             # Base phase adjustment
             line_adjust = (phase_delta / 360.0) * fsc_ratio
 
-            # --- New Frequency Drift Compensation ---
-            # Calculate the subcarrier cycle drift per sample:
-            # f_offset = burst.frequency - fsc (e.g., +0.15 Hz)
-            # Drift in cycles per sample = f_offset / sample_rate
-            # (Sample rate can be approximated via fsc * fsc_ratio)
+            # Calculate the subcarrier cycle frequency drift as samples:
             f_offset = burst.frequency - fsc
-            print("offset", f_offset, fsc, burst.frequency)
             sample_rate = fsc * fsc_ratio
             drift_cycles_per_sample = f_offset / sample_rate
 

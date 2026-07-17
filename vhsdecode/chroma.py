@@ -209,7 +209,7 @@ def _solve_4x4(A, b):
 
 @njit(nogil=True, fastmath=False, cache=True, inline='always')
 def _tune_burst_measurements(
-    burst, start_guess, amp_guess, phi_guess, dc_guess, fsc, f_weight=1e6, max_iter=16, max_precision=1e-10
+    burst, burst_start, amp_guess, phi_guess, dc_guess, fsc, f_weight=1e4, max_iter=32, max_precision=1e-10
 ):
     """
     Optimized Gauss-Newton tuner.
@@ -228,7 +228,7 @@ def _tune_burst_measurements(
     f_target = fsc
 
     N = len(burst)
-    t = (np.arange(N) + start_guess) / (4.0 * fsc)
+    t = (np.arange(N) + burst_start) / (4.0 * fsc)
 
     # Pre-allocate 4xN Jacobian array
     J = np.empty((4, N))
@@ -311,37 +311,34 @@ def _demod_burst(
     # get initial burst measurements
     I = 0.0
     Q = 0.0
+    burst_sum = 0.0
 
     for i in range(burst_len):
         burst_sample = burst[i]
+        burst_sum += burst_sample
         carrier_idx = i + burst_start
         I += burst_sample * burst_cos[carrier_idx]
         Q += burst_sample * burst_sin[carrier_idx]
 
 
     # build starting point for refinement
-    phi_guess = (np.arctan2(Q, I) + np.pi) % (2 * np.pi) - np.pi
-    dc_guess = np.mean(burst)
-    amp_guess = (2.0 * np.hypot(I, Q)) / burst_len
+    phi_guess = (math.atan2(Q, I) + math.pi) % (2.0 * math.pi) - math.pi
+    dc_guess = burst_sum / burst_len
+    amp_guess = (2.0 * math.sqrt(I * I + Q * Q)) / burst_len
 
     # refine burst measurements
     burst_amplitude, fit_phi, burst_dc, burst_frequency = _tune_burst_measurements(
         burst, burst_start, amp_guess, phi_guess, dc_guess, fsc
     )
 
-    # Convert the absolute fitted phase shift (radians) into a fractional sample offset.
-    # Since model uses (2*pi*fsc*t - phi) and fs = 4*fsc:
-    # Samples = t * fs = t * 4 * fsc.
-    # Therefore, 1 radian = 4 / (2 * pi) = 2 / pi samples.
-    # We add a modulo 4 tracking window to isolate sub-cycle position adjustments.
-    phase_sample_offset = (fit_phi % (2 * np.pi)) * (2.0 / np.pi)
-    
+    # Convert the absolute fitted phase shift (radians) into a fractional sample offset
+    phase_sample_offset = (fit_phi % (2.0 * math.pi)) * (2.0 / math.pi)
+
     # Combine the geometric window midpoint with the phase shift
     burst_center_relative = (burst_len - 1) / 2.0 + phase_sample_offset
-
     burst_center = burst_start + burst_center_relative
-    burst_phase_deg = np.degrees(fit_phi) % 360.0
-    burst_magnitude = burst_amplitude * (burst_len / 2)
+    burst_phase_deg = math.degrees(fit_phi) % 360.0
+    burst_magnitude = burst_amplitude * (burst_len / 2.0)
 
     return burst_center, burst_phase_deg, burst_magnitude, burst_dc, burst_frequency, I, Q
 
@@ -711,8 +708,8 @@ def upconvert_chroma_phase_comp(
     pi_over_two = np.pi / 2.0
 
     # Initial nominal reference coefficient
-    het_mhz_nominal = color_under_carrier_fs / 1e6
-    het_coefficient = pi_over_two * (1.0 + het_mhz_nominal / fsc)
+    het_hz_nominal = color_under_carrier_fs
+    het_coefficient = pi_over_two * (1.0 + het_hz_nominal / fsc)
 
     target_phase_even_rad = target_phase_even * deg2rad_scale
     target_phase_odd_rad = target_phase_odd * deg2rad_scale
@@ -723,18 +720,16 @@ def upconvert_chroma_phase_comp(
         
         # Solve for current line's active het_mhz:
         k_current = current_burst.frequency / fsc
-        f_cu_current = k_current * color_under_carrier_fs
-        het_mhz_current = f_cu_current / 1e6
+        het_hz_current = k_current * color_under_carrier_fs
 
         # Solve for next line's active het_mhz
         if idx < num_bursts - 1:
             next_burst = phase_rotation_sequence[idx + 1]
             k_next = next_burst.frequency / fsc
-            f_cu_next = k_next * color_under_carrier_fs
-            het_mhz_next = f_cu_next / 1e6
+            het_hz_next = k_next * color_under_carrier_fs
         else:
             next_burst = current_burst
-            het_mhz_next = het_mhz_current
+            het_hz_next = het_hz_current
 
         linestart = (current_burst.line_number - lineoffset) * outwidth
         lineend = linestart + outwidth
@@ -752,17 +747,15 @@ def upconvert_chroma_phase_comp(
             t = (i - linestart) / outwidth
 
             # Linearly interpolate het_mhz
-            het_mhz_interpolated = het_mhz_current + t * (het_mhz_next - het_mhz_current)
+            het_hz_interpolated = het_hz_current + t * (het_hz_next - het_hz_current)
 
             # Recalculate the active phase step coefficient
-            active_het_coefficient = pi_over_two * (1.0 + het_mhz_interpolated / fsc)
+            active_het_coefficient = pi_over_two * (1.0 + het_hz_interpolated / fsc)
 
             uphet[i] = chroma[i] * -math.cos(theta) - current_burst.dc
 
             # Increment phase
             theta += active_het_coefficient
-
-        print("burst", current_burst.frequency, current_burst.phase_deg, current_burst.dc)
 
 
 @njit(cache=True, nogil=True)
@@ -1105,7 +1098,7 @@ def process_chroma(
             outwidth,
             field.phase_sequence,
             field.rf.chroma_afc.color_under,
-            field.rf.chroma_afc.fsc_mhz,
+            field.rf.chroma_afc.fsc_mhz * 1e6,
             target_phase_even,
             target_phase_odd
         )
