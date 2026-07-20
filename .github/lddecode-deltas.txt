@@ -1,0 +1,41 @@
+# Branches rooted on upstream_ld/main (happycube/ld-decode -- the network ROOT,
+# which oyvindln/vhs-decode is itself a fork of), replayed onto `develop` after the
+# develop-deltas.txt entries. One entry per in-flight PR against happycube.
+#
+# Why a second manifest: these branches target a DIFFERENT upstream, so they rebase
+# onto upstream_ld/main rather than upstream/vhs_decode. Everything else is the same
+# -- sync-and-rebuild-develop rebases each (keeping its happycube PR current) and
+# cherry-picks it into develop.
+#
+# This exists because oyvindln's fork carries happycube's lddecode/ directory as
+# inherited code (NOT a vendored copy), and resyncs from happycube periodically. So a
+# fix we land at happycube reaches our decodes only after oyvindln's next merge. These
+# entries emulate that resync early: they carry the fix into `develop` in the meantime.
+# Paths align between the two lineages (lddecode/core.py is the same path, and the
+# regions we touch are byte-identical), so the cherry-picks apply cleanly.
+#
+# Naming: fix/ld_decode/<slug> for bug fixes, feature/ld_decode/<slug> for features.
+# The ld_decode/ segment names the target upstream (happycube/ld-decode) so a branch's
+# lineage is explicit vs the fix/vhs_decode/* entries in the sibling manifest. Bug/feature
+# split follows happycube's CONTRIBUTING.md convention.
+#
+# Lifecycle -- deliberately droppable:
+#   - add a line when you open a new branch + PR against happycube/ld-decode
+#   - remove the line once oyvindln's next merge from happycube carries it into
+#     upstream/vhs_decode; the delta then vanishes from develop with no other change.
+#     (Merging at happycube alone is NOT enough -- wait for it to reach oyvindln.)
+#   - revise the branch (or remove it) if the PR is rejected
+#
+# Lines starting with # and blank lines are ignored.
+
+# (none currently.)
+#
+# The decodefield-exception-mistaken-for-EOF fix merged at happycube as ld-decode#1052
+# (2026-07-19); its branch was deleted rather than carried, since we do not keep merged
+# branches. NOTE the trade-off: oyvindln has NOT yet resynced lddecode/ from happycube
+# (verified 2026-07-20), so `develop` does NOT carry this fix in the interim — a crashed
+# decode thread can again silently truncate a tape at the vhs-decode layer. That gap is
+# covered downstream: the pipeline's short-decode guard (_verify_decode_length in
+# pipeline/stages.py) rejects any decode below the expected field count, so a truncated
+# decode is caught and quarantined rather than shipped. When oyvindln resyncs, `develop`
+# picks the fix up from upstream automatically with no manifest change.

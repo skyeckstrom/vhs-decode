@@ -1,0 +1,201 @@
+name: sync-and-rebuild-develop
+
+# Keeps this fork current with its upstreams and rebuilds the `develop` deploy branch
+# as a clean replay of our in-flight deltas on top of upstream/vhs_decode.
+#
+# TWO upstreams (see FORK.md): happycube/ld-decode is the network ROOT and
+# oyvindln/vhs-decode is a fork of it, so a fix belongs to whichever one owns the code
+# it touches. GitHub allows only one fork per network per account, so this single repo
+# carries branches targeting both.
+#
+#   upstream     - oyvindln/vhs-decode  (vhs_decode branch) -- the lineage we deploy
+#   upstream_ld  - happycube/ld-decode  (main branch)       -- the network root
+#
+#   vhs_decode-overlay
+#            - default branch; upstream/vhs_decode + ONE overlay commit carrying only our
+#              control plane (this CI, the two delta manifests, FORK.md, README.md). It is
+#              RECONSTRUCTED each run, never rebased: we lay exactly that fileset onto a
+#              fresh upstream/vhs_decode checkout and commit. A guard then refuses to push
+#              if the overlay would touch any path outside that fileset. (A rebased overlay
+#              once captured a whole stale vhs_decode tree and replayed the bloat every
+#              sync -- the 2026-07 corruption; reconstruct-not-rebase makes that impossible.)
+#   develop  - deploy/integration branch = upstream/vhs_decode + each branch in
+#              .github/develop-deltas.txt, then each in .github/lddecode-deltas.txt,
+#              replayed in order. Force-pushed here. The vhs-decode-pipeline repo pins
+#              a develop SHA via the Docker build (docker/Dockerfile `VHS_DECODE_REF`).
+#   fix/vhs_decode/<slug>, fix/ld_decode/<slug> (+ feature/<upstream>/<slug>)
+#            - one branch per in-flight upstream PR, the <upstream> segment naming its
+#              target (vhs_decode -> oyvindln, ld_decode -> happycube) so lineage is
+#              explicit. Rooted on that upstream so the PR diffs cleanly; rebased onto it
+#              each run to keep the PR current. (happycube's CONTRIBUTING.md: fix/ vs feature/.)
+#
+# Remove a line from develop-deltas.txt once its PR merges into upstream/vhs_decode.
+# lddecode-deltas.txt entries are the "emulate the maintainer's resync" step: they carry
+# an ld-decode fix into develop until oyvindln's next merge from happycube brings it in
+# naturally -- at which point deleting the line drops the delta with no other change.
+# Revise the branch on rejection.
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'   # Mondays 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-and-rebuild-develop
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout overlay (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: vhs_decode-overlay
+          fetch-depth: 0
+
+      - name: Configure git + remotes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/oyvindln/vhs-decode.git
+          git fetch upstream vhs_decode
+          # The network root. oyvindln/vhs-decode is a fork of it and carries its
+          # lddecode/ directory as inherited code, so fixes to that code are PR'd here.
+          git remote add upstream_ld https://github.com/happycube/ld-decode.git
+          git fetch upstream_ld main
+          git fetch origin
+
+      - name: Rebuild vhs_decode-overlay = upstream/vhs_decode + control-plane fileset
+        run: |
+          # RECONSTRUCT the overlay, never rebase it. Snapshot our control-plane files from
+          # the current overlay tip, lay them onto a fresh upstream/vhs_decode checkout, and
+          # commit. The tree is then provably "upstream + exactly these paths" — a rebased
+          # overlay commit could (and once did) carry a stale source snapshot forward.
+          OVERLAY_FILES=".github/workflows/sync-and-rebuild-develop.yml .github/develop-deltas.txt .github/lddecode-deltas.txt FORK.md README.md"
+          PREV="$(git rev-parse origin/vhs_decode-overlay)"
+          git checkout -B vhs_decode-overlay upstream/vhs_decode
+          git checkout "$PREV" -- $OVERLAY_FILES
+          git add -A -- $OVERLAY_FILES
+
+          # GUARD: the overlay must differ from upstream ONLY in the control-plane fileset.
+          # If anything else shows up in the tree, refuse to push — this is the backstop
+          # that makes the 2026-07 source-bloat corruption structurally impossible.
+          LEAKED="$(git diff --cached --name-only upstream/vhs_decode -- . \
+            ':(exclude).github/workflows/sync-and-rebuild-develop.yml' \
+            ':(exclude).github/develop-deltas.txt' \
+            ':(exclude).github/lddecode-deltas.txt' \
+            ':(exclude)FORK.md' ':(exclude)README.md')"
+          if [ -n "$LEAKED" ]; then
+            echo "::error::overlay would touch non-control-plane paths — aborting:"; echo "$LEAKED"
+            exit 1
+          fi
+
+          if git diff --cached --quiet upstream/vhs_decode; then
+            echo "overlay identical to upstream + fileset already; nothing to commit"
+          else
+            git commit -m "ci: fork overlay — control plane on upstream/vhs_decode"
+          fi
+          git push --force-with-lease origin vhs_decode-overlay
+          git fetch origin vhs_decode-overlay
+
+      - name: Rebuild develop = upstream/vhs_decode + replayed deltas
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          git fetch upstream vhs_decode
+          git fetch upstream_ld main
+
+          # Read the ordered delta lists from the overlay branch (the develop tree we build
+          # below intentionally has no fork-CI files, so read them from that ref directly).
+          MANIFEST_VHS="$(git show origin/vhs_decode-overlay:.github/develop-deltas.txt 2>/dev/null || true)"
+          MANIFEST_LD="$(git show origin/vhs_decode-overlay:.github/lddecode-deltas.txt 2>/dev/null || true)"
+
+          git checkout -B develop upstream/vhs_decode
+
+          FAILED=""
+
+          # Replay every branch in a manifest onto develop.
+          #   $1 - manifest contents
+          #   $2 - the upstream ref the branches are rooted on (and are rebased onto)
+          #   $3 - manifest filename, for messages
+          # Handling is identical for both manifests; only the base ref differs.
+          replay_manifest() {
+            local manifest="$1" base="$2" name="$3" raw br
+            while IFS= read -r raw; do
+              br="$(printf '%s' "$raw" | sed 's/#.*//' | xargs || true)"
+              [ -z "$br" ] && continue
+              echo "::group::replaying $br (base: $base)"
+
+              if ! git ls-remote --exit-code --heads origin "$br" >/dev/null 2>&1; then
+                echo "::warning::branch $br listed in $name but missing on origin; skipping"
+                echo "::endgroup::"
+                continue
+              fi
+
+              git fetch origin "$br"
+              git checkout -B "$br" "origin/$br"
+
+              # Keep the branch (and thus its upstream PR) current with its upstream.
+              if ! git rebase "$base"; then
+                git rebase --abort || true
+                FAILED="$FAILED $br"
+                echo "::error::conflict rebasing $br onto $base"
+                git checkout develop
+                echo "::endgroup::"
+                continue
+              fi
+              git push -f origin "$br"
+
+              # Cherry-pick the branch's own commits (everything it adds on top of its
+              # base) onto develop. Each delta is rooted on its upstream, not on the
+              # prior delta, so a fast-forward merge only works for the first one;
+              # cherry-pick stacks independent deltas.
+              git checkout develop
+              if ! git cherry-pick "$base..$br"; then
+                git cherry-pick --abort || true
+                FAILED="$FAILED $br"
+                echo "::error::cannot cherry-pick $br onto develop"
+              fi
+              echo "::endgroup::"
+            done <<< "$manifest"
+          }
+
+          # vhs-decode-lineage deltas first, then the ld-decode ones. The order is
+          # arbitrary today (they touch different files) but is kept stable so a develop
+          # rebuild is reproducible.
+          replay_manifest "$MANIFEST_VHS" upstream/vhs_decode .github/develop-deltas.txt
+          replay_manifest "$MANIFEST_LD" upstream_ld/main .github/lddecode-deltas.txt
+
+          git push -f origin develop
+
+          if [ -n "$FAILED" ]; then
+            echo "FAILED_DELTAS=$FAILED" >> "$GITHUB_ENV"
+            exit 1
+          fi
+
+      - name: Open/update tracking issue on conflict
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="develop rebuild failed: delta replay conflict"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY="The scheduled \`sync-and-rebuild-develop\` run could not cleanly replay one or more deltas onto \`develop\`.
+
+          Failing deltas: \`${FAILED_DELTAS:-unknown}\`
+
+          To fix: rebase the branch onto the upstream it targets (\`upstream/vhs_decode\` for entries in \`.github/develop-deltas.txt\`, \`upstream_ld/main\` for entries in \`.github/lddecode-deltas.txt\`) and resolve the conflict, or remove/revise its entry in that manifest. If the upstream PR was rejected, this delta needs a new approach. If an \`lddecode-deltas.txt\` entry now conflicts because oyvindln resynced from happycube and already carries the fix, the entry can simply be deleted.
+
+          Run: ${RUN_URL}"
+          NUM="$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi

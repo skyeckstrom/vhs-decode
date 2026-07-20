@@ -1,0 +1,22 @@
+# Branches rooted on upstream/vhs_decode (oyvindln/vhs-decode), replayed in order onto
+# it to build `develop`. One entry per in-flight PR against oyvindln. The
+# sync-and-rebuild-develop workflow rebases each onto fresh upstream/vhs_decode and
+# cherry-picks it into develop.
+#
+# Fixes rooted on happycube/ld-decode (the network root, upstream of oyvindln) go in
+# lddecode-deltas.txt instead -- they rebase onto a different upstream. See FORK.md.
+#
+# Naming: fix/vhs_decode/<slug> for bug fixes, feature/vhs_decode/<slug> for features.
+# The vhs_decode/ segment names the target upstream so a branch's lineage is explicit
+# (its sibling manifest uses fix/ld_decode/<slug>). Bug/feature split follows happycube's
+# CONTRIBUTING.md convention, which oyvindln's fork inherits.
+#
+# Lifecycle:
+#   - add a line when you open a new branch + upstream PR
+#   - remove the line once that PR merges (the change is then in upstream/vhs_decode)
+#   - revise the branch (or remove it) if the PR is rejected
+#
+# Lines starting with # and blank lines are ignored.
+
+# (none currently — fix/vhs_decode/ire0-hsync-divide-by-zero merged upstream as
+#  oyvindln/vhs-decode#340 on 2026-07-20 and was dropped from this manifest.)
