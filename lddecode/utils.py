@@ -1,7 +1,6 @@
 # A collection of helper functions used in dev notebooks and lddecode_core.py
 
 from collections import namedtuple
-import itertools
 import json
 import math
 import os
@@ -1461,9 +1460,9 @@ class JSONDumper:
         build_json() returns None until a valid field has been decoded, so a
         decode that ends without ever getting one -- the source frequency not
         matching the file, say -- has no metadata to write. Passing that None
-        on would kill the writer thread with an AttributeError and leave a
-        truncated .tbc.json.tmp behind, burying the "Completed without
-        handling any frames" message the main thread prints just before this.
+        on would kill the writer thread with an AttributeError, burying the
+        "Completed without handling any frames" message the main thread prints
+        just before this.
 
         Nothing is dropped by returning early: field info is only drained once
         there is a JSON body to attach it to, and with no valid field there is
@@ -1485,56 +1484,75 @@ class JSONDumper:
         linebreak = '\n' if verboseVITS else ''
         separators = None if verboseVITS else (',', ':')
         separator = ',' + linebreak
-        field_info = []
 
-        while True:
-            try:
-                item = queue.get()
-                if item is None:
+        # Each record is appended once, where the last dump left off, so neither
+        # the records nor the file are held in memory. "fields" comes first so
+        # the array can be extended in place -- the metadata after it carries
+        # numberOfSequentialFields, which widens as the decode runs.
+        def enc(s):
+            return s.encode("ascii")
+
+        def dumps(obj):
+            return json.dumps(obj, allow_nan=False, indent=indent, separators=separators)
+
+        # Binary mode so offsets are exact byte counts: the append position can then
+        # be advanced arithmetically instead of with tell(), which on a text stream
+        # forces a flush and would expose a half-written array to any reader. Output
+        # is pure ASCII (json.dumps escapes non-ASCII by default).
+        f = None
+        head = enc('{' + linebreak + '"fields":[' + linebreak)
+        fields_end = 0
+        wrote_a_field = False
+
+        try:
+            while True:
+                try:
+                    item = queue.get()
+                    if item is None:
+                        break
+
+                    jsondict, next_field_info = item
+                    ready.set()
+                except (InterruptedError, KeyboardInterrupt):
                     break
 
-                jsondict, next_field_info = item
-                ready.set()
-            except (InterruptedError, KeyboardInterrupt):
-                break
+                # This batch's records, appended where the last dump left off.
+                parts = []
+                for field in next_field_info:
+                    if wrote_a_field:
+                        parts.append(separator)
 
-            # json serialize each field info object to a string
-            serialized_field_info = []
-            for field in next_field_info:
-                serialized_field_info.append(
-                    json.dumps(
-                        field,
-                        allow_nan=False,
-                        indent=indent,
-                        separators=separators
-                    )
-                )
+                    parts.append(dumps(field))
+                    wrote_a_field = True
 
-            field_info.append(serialized_field_info)
+                records = enc(''.join(parts))
 
-            f = open(outname + ".tbc.json.tmp", "w")
-            f.write('{'+linebreak)
-            # write the field metadata
-            for (k, v) in jsondict.items():
-                json.dump(k, f, allow_nan=False, indent=indent, separators=separators)
-                f.write(':')
-                json.dump(v, f, allow_nan=False, indent=indent, separators=separators)
-                f.write(separator)
+                # Close the array, then the field metadata.
+                tail = [linebreak, ']']
+                for (k, v) in jsondict.items():
+                    tail += [separator, dumps(k), ':', dumps(v)]
+                tail += [linebreak, '}', '\n']
 
-            # Write the field info
-            f.write('"fields":['+linebreak)
-            for i, field in enumerate(itertools.chain.from_iterable(field_info)):
-                if i != 0:
-                    f.write(separator)
+                # Opened only now, with the first snapshot fully serialized, so a
+                # decode that never gets that far leaves no file behind.
+                if f is None:
+                    f = open(outname + ".tbc.json", "wb")
+                    records = head + records
 
-                f.write(field)
-            f.write(linebreak+']'+linebreak+'}')
+                # One write for records + tail, so the file goes from one complete
+                # state to the next rather than through a half-written one.
+                f.seek(fields_end)
+                f.write(records + enc(''.join(tail)))
+                f.flush()
+                # The metadata shrinks when a count loses a digit, so drop anything
+                # the previous, longer dump left past the end.
+                f.truncate()
 
-            f.write('\n')
-            f.close()
-            os.replace(outname + ".tbc.json.tmp", outname + ".tbc.json")
-
-            ready.clear()
+                fields_end += len(records)
+                ready.clear()
+        finally:
+            if f is not None:
+                f.close()
 
 
 class StridedCollector:
