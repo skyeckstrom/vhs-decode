@@ -50,6 +50,11 @@ from vhsdecode.rust_utils import sosfiltfilt_rust
 from vhsdecode.dbwriter import DBWriter
 
 
+# How many consecutive fields readfield() lets fail before it checks that they
+# got anywhere. See readfield().
+FIELD_STALL_WINDOW = 16
+
+
 def is_secam(system: str):
     return system == "SECAM" or system == "MESECAM"
 
@@ -450,6 +455,9 @@ class VHSDecode(ldd.LDdecode):
         df_args = None
         f = None
         offset = 0
+        failed = 0
+        window_start = None
+        stalled = False
 
         if len(self.fieldstack) >= 2:
             ## Done in main files
@@ -483,6 +491,47 @@ class VHSDecode(ldd.LDdecode):
                 # ... but if the first call, this is empty
                 if len(self.threadreturn) > 0:
                     f, offset = self.threadreturn["field"], self.threadreturn["offset"]
+
+            # This loop only ends once a field decodes, so every offset it takes
+            # has to get somewhere. compute_linelocs() can hand back one that
+            # does not: where the line length it measures is far enough off that
+            # the field never looks long enough, its resume offset clamps to a
+            # single line. That offset is a deterministic function of the data,
+            # so decoding a line further on fails for the same reason, and the
+            # decode crawls forward a line per attempt, starting a decode thread
+            # for each and putting nothing in the output file. Seen on a real
+            # capture as several hundred new threads a minute against a
+            # byte-frozen output, at the same sample every run.
+            #
+            # So watch what the attempts add up to rather than how many there
+            # are. Failing repeatedly is normal on damaged tape and is already
+            # how the decoder hunts for the next field it can read -- the skips
+            # it asks for there cover fields at a time. Only once a window of
+            # them has not covered even one field is it crawling, and from there
+            # each attempt is put a whole field on so it lands on data the
+            # decoder has not already rejected. Fields go undecoded either way;
+            # this only keeps the decode from stopping inside the damage rather
+            # than carrying on past it.
+            if f is not None and not f.valid and offset is not None:
+                whole_field = self.rf.linelen * self.output_lines
+
+                if window_start is None:
+                    window_start = self.fdoffset
+
+                failed += 1
+                if failed >= FIELD_STALL_WINDOW:
+                    if not stalled and self.fdoffset - window_start < whole_field:
+                        stalled = True
+                        ldd.logger.warning(
+                            "Field decoding has not advanced past sample %d in %d attempts, skipping a field at a time from here",
+                            window_start,
+                            failed,
+                        )
+                    failed = 0
+                    window_start = self.fdoffset
+
+                if stalled:
+                    offset = max(offset, whole_field)
 
             # Start new thread
             self.threadreturn = {}
