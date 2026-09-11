@@ -1758,6 +1758,9 @@ class FieldShared:
 
         if res == NO_PULSES_FOUND:
             ldd.logger.error("Unable to find any sync pulses, jumping 100 ms")
+            ldd.logger.info(
+                "RFTRACE site=no_pulses offset=%d", int(self.rf.freq_hz / 10)
+            )
             return None, None, int(self.rf.freq_hz / 10)
 
         line0loc, first_hsync_loc, first_hsync_loc_line, meanlinelen, vblank_pulses = res
@@ -1781,6 +1784,9 @@ class FieldShared:
         if first_hsync_loc is None:
             if self.initphase is False:
                 ldd.logger.error("Unable to determine start of field - dropping field")
+            ldd.logger.info(
+                "RFTRACE site=no_hsync offset=%d", self.inlinelen * 100
+            )
             return None, None, self.inlinelen * 100
 
         # If we don't have enough data at the end, move onto the next field
@@ -1805,6 +1811,18 @@ class FieldShared:
                 ldd.logger.info(
                     "Did not find the expected number of lines (lastline < proclines) , skipping a tiny bit"
                 )
+            ldd.logger.info(
+                "RFTRACE site=short_field raw=%.1f clamped=%d line0loc=%.1f "
+                "meanlinelen=%.1f inlinelen=%d lastline=%.3f proclines=%d prevfield=%s",
+                line0loc - (meanlinelen * 20),
+                max(line0loc - (meanlinelen * 20), self.inlinelen),
+                line0loc,
+                meanlinelen,
+                self.inlinelen,
+                lastline,
+                proclines,
+                self.prevfield is not None,
+            )
             return None, None, max(line0loc - (meanlinelen * 20), self.inlinelen)
 
         linelocs, lineloc_errs, last_validpulse = sync.valid_pulses_to_linelocs(

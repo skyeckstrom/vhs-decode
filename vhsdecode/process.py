@@ -515,6 +515,17 @@ class VHSDecode(ldd.LDdecode):
             if f is not None and not f.valid and offset is not None:
                 whole_field = self.rf.linelen * self.output_lines
 
+                ldd.logger.info(
+                    "RFTRACE attempt n=%d fdoffset=%d offset=%s whole_field=%d "
+                    "window_start=%s stalled=%s",
+                    failed + 1,
+                    self.fdoffset,
+                    offset,
+                    whole_field,
+                    window_start,
+                    stalled,
+                )
+
                 if window_start is None:
                     window_start = self.fdoffset
 
