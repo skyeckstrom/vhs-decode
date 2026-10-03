@@ -1637,7 +1637,7 @@ class JSONDumper:
 
             f.write('\n')
             f.close()
-            _atomic_replace_with_retry(outname + ".tbc.json.tmp", outname + ".tbc.json")
+            os.replace(outname + ".tbc.json.tmp", outname + ".tbc.json")
 
             ready.clear()
 
