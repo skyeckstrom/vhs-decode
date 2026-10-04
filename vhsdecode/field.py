@@ -20,6 +20,23 @@ NO_PULSES_FOUND = 1
 
 Pulse = namedtuple('Pulse', ['start', 'len', 'transition', 'level_low', 'level_high'])
 
+# What _try_get_pulses() leaves on rf for the next field to predict its sync from.
+SYNC_STATE = (
+    "prev_first_hsync_readloc",
+    "prev_first_hsync_loc",
+    "prev_first_hsync_diff",
+    "prev_first_field",
+    "prev_progressive_field",
+)
+
+
+def _restore_sync_state(rf, state):
+    for name in SYNC_STATE:
+        if name in state:
+            setattr(rf, name, state[name])
+        elif hasattr(rf, name):
+            delattr(rf, name)
+
 # def ynr(data, hpfdata, line_len):
 #     """Dumb vcr-line ynr
 #     """
@@ -1740,6 +1757,12 @@ class FieldShared:
 
 
     def compute_linelocs(self):
+        # Finding this field's sync overwrites the previous field's on rf. Keep it, in
+        # case this field is rejected below and read again.
+        sync_state = {
+            name: getattr(self.rf, name) for name in SYNC_STATE if hasattr(self.rf, name)
+        }
+
         do_level_detect = (
             self.rf.options.saved_levels is False
             or self.rf.compute_linelocs_issues is True
@@ -1805,6 +1828,13 @@ class FieldShared:
                 ldd.logger.info(
                     "Did not find the expected number of lines (lastline < proclines) , skipping a tiny bit"
                 )
+            # The next attempt reads this same field again, from just before line 0, so
+            # it has to predict the field from the last one actually used. Predicting it
+            # from this one aims a whole field further on: wherever the vsync pulses
+            # cannot be read and the prediction is all there is, each attempt then finds
+            # its field too late in the block to fit, skips one field, and the decode
+            # crawls forward without writing anything.
+            _restore_sync_state(self.rf, sync_state)
             return None, None, max(line0loc - (meanlinelen * 20), self.inlinelen)
 
         linelocs, lineloc_errs, last_validpulse = sync.valid_pulses_to_linelocs(
