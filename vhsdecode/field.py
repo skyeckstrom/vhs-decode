@@ -18,6 +18,9 @@ from collections import namedtuple
 
 NO_PULSES_FOUND = 1
 
+# Consecutive fields whose start can't be found before the skip past them starts to grow.
+FIELD_START_MISSES_BEFORE_BACKOFF = 10
+
 Pulse = namedtuple('Pulse', ['start', 'len', 'transition', 'level_low', 'level_high'])
 
 # What _try_get_pulses() leaves on rf for the next field to predict its sync from.
@@ -1804,7 +1807,20 @@ class FieldShared:
         if first_hsync_loc is None:
             if self.initphase is False:
                 ldd.logger.error("Unable to determine start of field - dropping field")
-            return None, None, self.inlinelen * 100
+            # A miss steps on only 100 lines, so a long stretch with no field to find --
+            # unrecorded tape after the end of a recording, say -- is crossed at a few
+            # percent of real time. Past a run of misses, double the step each time, up
+            # to the 100 ms used when no sync pulses are found at all. The first field
+            # found sets it back, so at most that last step is lost when picture returns.
+            misses = getattr(self.rf, "field_start_misses", 0) + 1
+            self.rf.field_start_misses = misses
+            step = self.inlinelen * 100
+            if misses > FIELD_START_MISSES_BEFORE_BACKOFF:
+                doublings = min(misses - FIELD_START_MISSES_BEFORE_BACKOFF, 16)
+                step = min(step * 2 ** doublings, int(self.rf.freq_hz / 10))
+            return None, None, step
+
+        self.rf.field_start_misses = 0
 
         # If we don't have enough data at the end, move onto the next field
         lastline = (len(self.data["input"]) - line0loc) / meanlinelen - 1
