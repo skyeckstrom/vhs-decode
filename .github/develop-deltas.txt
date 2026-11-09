@@ -1,0 +1,46 @@
+# Branches rooted on upstream/vhs_decode (oyvindln/vhs-decode), replayed in order onto
+# it to build `develop`. One entry per in-flight PR against oyvindln. The
+# sync-and-rebuild-develop workflow rebases each onto fresh upstream/vhs_decode and
+# cherry-picks it into develop.
+#
+# Fixes rooted on happycube/ld-decode (the network root, upstream of oyvindln) go in
+# lddecode-deltas.txt instead -- they rebase onto a different upstream. See FORK.md.
+#
+# Naming: fix/vhs_decode/<slug> for bug fixes, feature/vhs_decode/<slug> for features.
+# The vhs_decode/ segment names the target upstream so a branch's lineage is explicit
+# (its sibling manifest uses fix/ld_decode/<slug>). Bug/feature split follows happycube's
+# CONTRIBUTING.md convention, which oyvindln's fork inherits.
+#
+# Lifecycle:
+#   - add a line when you open a new branch + upstream PR
+#   - remove the line once that PR merges (the change is then in upstream/vhs_decode)
+#   - revise the branch (or remove it) if the PR is rejected
+#
+# Lines starting with # and blank lines are ignored.
+
+fix/vhs_decode/short-field-sync-state
+
+# ^ compute_linelocs() rejects a field that starts too late in the block to fit and reads
+# it again, but _try_get_pulses() has already recorded that field's sync as the previous
+# field's. Where vsync can't be read, the prediction then aims a field too far every
+# attempt and the decode crawls forward writing nothing (Movie_12 at frame 30361). Not
+# filed upstream until Movie_12 decodes clean on it.
+
+fix/vhs_decode/field-start-miss-backoff
+
+# ^ A field whose start can't be found is dropped with a 100-line step, so unrecorded tape
+# after a recording ends is crossed at ~4% of real time (Movie_12: ~30 h of nothing after
+# 16.5 min of picture). Steps grow after 10 misses in a row, up to 100 ms; reset on a find.
+
+compat/vhs_decode/jsondumper-unbounded-field-retention
+
+# ^ NOT an upstream PR -- a develop-only shim paired with the lddecode-deltas.txt entry of
+# the same slug. 6e523e87 (oyvindln) changed JSONDumper's .tbc.json.tmp replace to
+# _atomic_replace_with_retry(); the streaming fix deletes that replace outright, so the
+# two conflict whatever the fix looks like. This puts happycube's os.replace() line back
+# so the ld-decode delta applies as it does on happycube, then removes it. Drop both lines
+# together: on its own this branch would undo the SMB retry for the old rewrite path.
+# If oyvindln's lddecode/ resync makes this fail to rebase, delete both entries.
+
+# fix/vhs_decode/ire0-hsync-divide-by-zero merged upstream as oyvindln/vhs-decode#340 on
+# 2026-07-20 and was dropped from this manifest.
